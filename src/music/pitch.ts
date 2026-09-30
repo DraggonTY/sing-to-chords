@@ -1,3 +1,4 @@
+import { segmentSingingNotes, type MelodyFrame } from './segment.ts'
 import type { RawNote } from './theory.ts'
 
 // YIN/MPM periodicity with threshold-weighted alternatives and temporal decoding.
@@ -7,12 +8,10 @@ const WINDOW = 768
 const HOP = 120
 const LOW_FREQUENCY = 55
 const HIGH_FREQUENCY = 1300
-const HOP_SECONDS = HOP / RATE
 
 type Candidate = { midi: number; probability: number }
-type Frame = { time: number; candidates: Candidate[] }
-type PitchFrame = { time: number; pitch: number | null }
-type Segment = { pitch: number; start: number; end: number }
+type Frame = { time: number; candidates: Candidate[]; energy: number }
+type PitchFrame = MelodyFrame
 
 /** Extract one sung melody, retaining the recording's original timing. */
 export function extractSingingNotes(samples: Float32Array, sampleRate: number, bpm: number): RawNote[] {
@@ -24,7 +23,7 @@ export function extractSingingNotes(samples: Float32Array, sampleRate: number, b
   if (samples.length / sampleRate < 0.07) return []
   const audio = prepareAudio(samples, sampleRate)
   const frames = measureFrames(audio)
-  const notes = segmentNotes(decode(frames), samples.length / sampleRate)
+  const notes = segmentSingingNotes(decode(frames), samples.length / sampleRate)
   return notes.map((note, index) => {
     const midi = Math.round(note.pitch)
     const startBeat = round3(note.start * bpm / 60)
@@ -116,7 +115,7 @@ function measureFrames(audio: Float32Array): Frame[] {
       frame.set(audio.subarray(start, end), start - offset)
       candidates = pitchCandidates(frame)
     }
-    frames.push({ time: center / RATE, candidates })
+    frames.push({ time: center / RATE, candidates, energy: energies[index] })
   }
   return frames
 }
@@ -215,88 +214,10 @@ function decode(frames: Frame[]): PitchFrame[] {
   let cursor = previousScores.indexOf(Math.max(...previousScores))
   const path: PitchFrame[] = new Array(frames.length)
   for (let index = frames.length - 1; index >= 0; index--) {
-    path[index] = { time: frames[index].time, pitch: states[index][cursor].pitch }
+    path[index] = { time: frames[index].time, pitch: states[index][cursor].pitch, energy: frames[index].energy }
     cursor = backs[index][cursor]
   }
   return path
-}
-
-function segmentNotes(frames: PitchFrame[], duration: number): Segment[] {
-  // Median smoothing stays inside voiced regions and does not rewrite octaves.
-  const smoothed = frames.map((frame, index) => {
-    if (frame.pitch === null) return frame
-    const pitches = frames.slice(Math.max(0, index - 1), index + 2)
-      .filter((other) => other.pitch !== null && Math.abs(other.pitch - frame.pitch!) < 1.5)
-      .map((other) => other.pitch!)
-    return { ...frame, pitch: median(pitches) }
-  })
-  const notes: Segment[] = []
-  let current: PitchFrame[] = []
-  let pending: PitchFrame[] = []
-  const close = () => {
-    if (current.length >= 7) {
-      const start = Math.max(0, current[0].time - HOP_SECONDS / 2)
-      const end = Math.min(duration, current[current.length - 1].time + HOP_SECONDS / 2)
-      if (end - start >= 0.065) {
-        const pitches = current.map((frame) => frame.pitch!)
-        const trim = Math.floor(pitches.length * 0.12)
-        notes.push({ pitch: median(pitches.slice(trim, pitches.length - trim)), start, end })
-      }
-    }
-    current = []
-    pending = []
-  }
-  for (const frame of smoothed) {
-    if (frame.pitch === null) {
-      pending = []
-      if (current.length && frame.time - current[current.length - 1].time >= 0.025) close()
-      continue
-    }
-    if (!current.length) { current = [frame]; continue }
-    const center = median(current.slice(-100).map((item) => item.pitch!))
-    if (Math.abs(frame.pitch - center) <= 0.7) {
-      current.push(...pending, frame)
-      pending = []
-      continue
-    }
-    if (pending.length && Math.sign(frame.pitch - center) !== Math.sign(pending[0].pitch! - center)) pending = []
-    pending.push(frame)
-    const pendingCenter = median(pending.slice(-7).map((item) => item.pitch!))
-    const moved = Math.abs(pendingCenter - center)
-    // Semitones settle for 70 ms; larger changes need 40 ms. This absorbs vibrato
-    // but preserves chromatic steps and short, genuinely sung octave leaps.
-    const needed = moved > 1.5 ? 4 : 7
-    if (pending.length >= needed && (moved > 1.5 || Math.round(pendingCenter) !== Math.round(center))) {
-      const next = pending
-      close()
-      current = next
-    } else if (pending.length >= 12) {
-      // Gentle detuning that never reaches a new note is still part of the
-      // current note; don't leave an arbitrarily long, uncommitted tail.
-      current.push(...pending)
-      pending = []
-    }
-  }
-  close()
-  const merged: Segment[] = []
-  for (const note of notes) {
-    const previous = merged[merged.length - 1]
-    // A settling pitch can split one sustained note early in its first vibrato
-    // cycle. Join only touching equal notes, never notes separated by a rest.
-    if (previous && Math.round(previous.pitch) === Math.round(note.pitch) && note.start - previous.end <= 0.010001) {
-      const previousLength = previous.end - previous.start
-      const length = note.end - note.start
-      previous.pitch = (previous.pitch * previousLength + note.pitch * length) / (previousLength + length)
-      previous.end = note.end
-    } else merged.push(note)
-  }
-  return merged
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b)
-  const middle = Math.floor(sorted.length / 2)
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
 function parabola(left: number, center: number, right: number): number {

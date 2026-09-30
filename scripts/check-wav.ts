@@ -1,0 +1,35 @@
+import assert from 'node:assert/strict'
+import { encodeMonoWav } from '../src/audio/wav.ts'
+
+const input = Float32Array.of(-2, -1, -0.5, 0, 0.5, 1, 2, NaN, Infinity)
+const bytes = encodeMonoWav(input, 48000)
+const view = new DataView(bytes)
+const text = (start: number, end: number) => new TextDecoder().decode(bytes.slice(start, end))
+assert.equal(text(0, 4), 'RIFF')
+assert.equal(text(8, 12), 'WAVE')
+assert.equal(text(12, 16), 'fmt ')
+assert.equal(view.getUint32(4, true), bytes.byteLength - 8)
+assert.equal(view.getUint32(16, true), 16)
+assert.equal(view.getUint16(20, true), 1, 'PCM format')
+assert.equal(view.getUint16(22, true), 1, 'one channel')
+assert.equal(view.getUint32(24, true), 48000)
+assert.equal(view.getUint32(28, true), 96000)
+assert.equal(view.getUint16(32, true), 2)
+assert.equal(view.getUint16(34, true), 16)
+assert.equal(text(36, 40), 'data')
+assert.equal(view.getUint32(40, true), input.length * 2)
+assert.deepEqual(Array.from(input, (_, index) => view.getInt16(44 + index * 2, true)),
+  [-32768, -32768, -16384, 0, 16384, 32767, 32767, 0, 0])
+
+// The encoder must respect the trimmed take's typed-array offset.
+const trimmed = Float32Array.of(-1, 0.25, 0.5, 1).subarray(1, 3)
+const cropped = new DataView(encodeMonoWav(trimmed, 44100))
+assert.equal(cropped.byteLength, 48)
+assert.equal(cropped.getUint32(24, true), 44100)
+assert.equal(cropped.getUint32(40, true), 4)
+assert.equal(cropped.getInt16(44, true), 8192)
+assert.equal(cropped.getInt16(46, true), 16384)
+assert.equal(encodeMonoWav(new Float32Array(), 16000).byteLength, 44)
+assert.throws(() => encodeMonoWav(input, 0), RangeError)
+assert.throws(() => encodeMonoWav(input, NaN), RangeError)
+console.log('ok WAV: mono PCM header, sample rate, clipping, nonfinite samples, trimmed take')

@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Session, type PlayableNote } from './audio/session.ts'
+import { Session, type RecordedTake } from './audio/session.ts'
+import { makePlaybackPlan } from './audio/playback.ts'
+import { encodeMonoWav } from './audio/wav.ts'
 import { applyQuantize, analyzeNoteList, layoutChords, placeLabel, type ChordSlot, type ChordSpan, type QuantizeDivision } from './music/analyze.ts'
 import { transcribeSinging } from './music/transcribe.ts'
 import { sampleTune, sampleWords } from './music/demo.ts'
 import { chordEvents, encodePianoMidi } from './music/midi.ts'
 import { PITCH_NAMES, confidenceLabel, keyName, noteName, type KeySignature, type Mode } from './music/theory.ts'
+import './RecordingReview.css'
 
 type Phase = 'ready' | 'count' | 'record' | 'analyze'
 type Song = {
@@ -13,11 +16,18 @@ type Song = {
   confidence: number
   edits: Record<string, string>
   raw: ReturnType<typeof analyzeNoteList>['notes']
+  recordedBpm: number
+  takeId?: number
 }
+type SavedTake = RecordedTake & { id: number; bpm: number; url: string }
 
 export default function App() {
   const [studio] = useState(() => new Session())
   const analysisRequest = useRef<AbortController | null>(null)
+  const playbackRequest = useRef(0)
+  const takeSequence = useRef(0)
+  const originalVoice = useRef<HTMLAudioElement | null>(null)
+  const [lastTake, setLastTake] = useState<SavedTake | null>(null)
 
   const [bpm, setBpm] = useState(92)
   const [quantize, setQuantize] = useState<QuantizeDivision>('16')
@@ -41,15 +51,36 @@ export default function App() {
   const selected = slots.find((slot) => slot.id === selectedId) ?? slots[0] ?? null
 
   useEffect(() => {
-    return () => studio.cancel()
+    return () => {
+      playbackRequest.current += 1
+      studio.cancel()
+    }
   }, [studio])
 
   useEffect(() => () => analysisRequest.current?.abort(), [])
 
+  useEffect(() => {
+    const player = originalVoice.current
+    return () => {
+      player?.pause()
+      if (lastTake) URL.revokeObjectURL(lastTake.url)
+    }
+  }, [lastTake])
+
+  function stopPiano() {
+    playbackRequest.current += 1
+    studio.stopPlayback()
+    setPianoMessage(null)
+    setPlayhead(null)
+  }
+
   async function startRecording() {
+    originalVoice.current?.pause()
+    analysisRequest.current?.abort()
+    analysisRequest.current = null
     setError(null)
     setPlayhead(null)
-    studio?.stopPlayback()
+    stopPiano()
     setPhase('count')
     setCountBeat(4)
     try {
@@ -77,10 +108,17 @@ export default function App() {
       setError('That stopped during the count-in. Let the metronome reach 1, then sing.')
       return
     }
+    const savedTake: SavedTake = {
+      ...take,
+      id: ++takeSequence.current,
+      bpm,
+      url: URL.createObjectURL(new Blob([encodeMonoWav(take.samples, take.sampleRate)], { type: 'audio/wav' })),
+    }
+    setLastTake(savedTake)
     const request = new AbortController()
     analysisRequest.current?.abort()
     analysisRequest.current = request
-    void transcribeSinging(take.samples, take.sampleRate, bpm, request.signal)
+    void transcribeSinging(savedTake.samples, savedTake.sampleRate, savedTake.bpm, request.signal)
       .then((analysis) => {
         if (request.signal.aborted) return
         if (!analysis.notes.length) {
@@ -94,6 +132,8 @@ export default function App() {
           confidence: analysis.confidence,
           edits: {},
           raw: analysis.notes,
+          recordedBpm: savedTake.bpm,
+          takeId: savedTake.id,
         })
         setSelectedId(null)
         setPhase('ready')
@@ -115,6 +155,10 @@ export default function App() {
   }
 
   function loadSample() {
+    originalVoice.current?.pause()
+    analysisRequest.current?.abort()
+    analysisRequest.current = null
+    stopPiano()
     studio?.cancel()
     setError(null)
     setPlayhead(null)
@@ -125,32 +169,36 @@ export default function App() {
       confidence: analysis.confidence,
       edits: {},
       raw: analysis.notes,
+      recordedBpm: 96,
     })
     setSelectedId(null)
     setPhase('ready')
     setBpm(96)
   }
 
-  async function play() {
-    if (!slots.length || !studio) return
-    const piano = chordEvents(slots).map((event) => ({ ...event, velocity: 96 }))
-    const melody: PlayableNote[] = hearMelody
-      ? notes.map((note) => ({
-          midi: note.midi,
-          startBeat: note.startBeat,
-          durationBeats: note.durationBeats,
-          velocity: 72,
-        }))
-      : []
+  async function play(melodyOnly = false) {
+    if (!song || !(melodyOnly ? song.raw.length : slots.length)) return
+    originalVoice.current?.pause()
+    const request = ++playbackRequest.current
+    const plan = makePlaybackPlan(song, { notes, chords: slots, bpm, hearMelody, withClick: clickOnPlay }, melodyOnly)
     setPianoMessage('Loading the piano…')
     setError(null)
     try {
-      await studio.play([...piano, ...melody], bpm, clickOnPlay, setPlayhead)
-      setPianoMessage(null)
+      await studio.play(plan.notes, plan.bpm, plan.withClick, setPlayhead)
+      if (request === playbackRequest.current) setPianoMessage(null)
     } catch {
+      if (request !== playbackRequest.current) return
       setPianoMessage(null)
       setError('The piano samples did not load. Check your connection and press play again.')
     }
+  }
+
+  function saveVoice() {
+    if (!lastTake) return
+    const link = document.createElement('a')
+    link.href = lastTake.url
+    link.download = 'sing-to-chords-voice.wav'
+    link.click()
   }
 
   function exportMidi() {
@@ -267,7 +315,13 @@ export default function App() {
           <button type="button" disabled={!slots.length || busy || pianoMessage !== null} onClick={() => void play()}>
             {pianoMessage ?? 'Play piano'}
           </button>
-          <button type="button" disabled={!slots.length || busy} onClick={() => studio.stopPlayback()}>
+          <button type="button" disabled={!notes.length || busy || pianoMessage !== null} onClick={() => void play(true)}>
+            Play detected melody
+          </button>
+          <button type="button" disabled={(!notes.length && !lastTake) || busy} onClick={() => {
+            originalVoice.current?.pause()
+            stopPiano()
+          }}>
             Stop play
           </button>
           <button type="button" disabled={!slots.length || busy} onClick={exportMidi}>
@@ -291,6 +345,35 @@ export default function App() {
         <p>Wear headphones so the click stays out of the recording.</p>
       </div>
 
+      {lastTake && (
+        <section className="options voice-review" aria-label="Compare your voice and detected melody">
+          <div className="voice-review-label">
+            <strong>Original voice</strong>
+            <small>{(lastTake.samples.length / lastTake.sampleRate).toFixed(1)} seconds · recorded at {lastTake.bpm} BPM</small>
+          </div>
+          <audio
+            ref={originalVoice}
+            src={lastTake.url}
+            controls={!busy}
+            preload="metadata"
+            aria-label="Original voice recording"
+            onPlay={() => {
+              if (busy) originalVoice.current?.pause()
+              else {
+                stopPiano()
+                setError(null)
+              }
+            }}
+            onError={() => setError('The voice recording could not play. Use Save voice to listen to the WAV file.')}
+          />
+          <button type="button" className="ghost" onClick={saveVoice}>Save voice</button>
+          <p>Detected melody · original timing, without chords or the click. Tempo and Quantize apply to Play piano.</p>
+          {song && song.takeId !== lastTake.id && (
+            <p>The displayed melody is from {song.source === 'sample' ? 'the sample tune' : 'your previous take'}.</p>
+          )}
+        </section>
+      )}
+
       <section className={`meter phase-${phase}`} aria-live="polite">
         <Lamp pulse={pulse} active={phase === 'count' || phase === 'record'} />
         <div>
@@ -305,7 +388,7 @@ export default function App() {
           {phase === 'ready' && !song && <strong>Ready when you are</strong>}
           <span>
             {phase === 'ready' && !song
-              ? 'Four clicks, then sing the whole tune. Every note you hold is kept.'
+              ? 'Four clicks, then sing the whole tune. Compare your voice with the detected melody afterward.'
               : 'Chords follow the whole phrase. Beat, half bar, or bar sets how often they can change.'}
           </span>
         </div>

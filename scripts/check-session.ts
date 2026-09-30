@@ -33,7 +33,9 @@ class MockFilter extends MockNode {
   Q = new MockParam()
 }
 class MockProcessor extends MockNode {
+  bufferSize: number
   onaudioprocess: ((event: unknown) => void) | null = null
+  constructor(bufferSize: number) { super(); this.bufferSize = bufferSize }
 }
 
 class MockContext {
@@ -45,7 +47,7 @@ class MockContext {
   resume = async () => {}
   keep<T extends MockNode>(node: T): T { this.nodes.push(node); return node }
   createMediaStreamSource() { return this.keep(new MockNode()) }
-  createScriptProcessor() { return this.keep(new MockProcessor()) }
+  createScriptProcessor(bufferSize: number) { return this.keep(new MockProcessor(bufferSize)) }
   createGain() { return this.keep(new MockGain()) }
   createOscillator() { return this.keep(new MockOscillator()) }
   createBufferSource() { return this.keep(new MockBufferSource()) }
@@ -182,19 +184,49 @@ try {
     await pending
     const context = env.contexts[0]
     const processor = context.nodes.find((node) => node instanceof MockProcessor) as MockProcessor
-    const samples = Float32Array.from({ length: 4096 }, (_, i) => i)
-    // Count-in ends at 12.12; the first stored buffer spans 12.08–12.16533…
-    context.currentTime = 12.08 + samples.length / context.sampleRate
-    for (let i = 0; i < 4; i++) {
+    assert.equal(processor.bufferSize, 1024)
+    const samples = Float32Array.from({ length: 1024 }, (_, i) => i)
+    // Count-in ends at 12.12; this block starts 10 ms before the downbeat.
+    context.currentTime = 12.11 + samples.length / context.sampleRate
+    for (let i = 0; i < 16; i++) {
       processor.onaudioprocess?.({ inputBuffer: { getChannelData: () => samples } })
       context.currentTime += samples.length / context.sampleRate
     }
     const take = session.finishTake()
     assert.ok(take)
     assert.equal(take.sampleRate, 48000)
-    assert.equal(take.samples[0], 1920)
-    assert.equal(take.samples.length, 4096 * 4 - 1920)
+    assert.equal(take.samples[0], 480)
+    assert.equal(take.samples.length, 1024 * 16 - 480)
     assert.equal(processor.onaudioprocess, null)
+  }
+
+  // Synchronous Stop cannot retrieve an input block that has not arrived yet.
+  // With regular callbacks, the worst boundary gap is now <1024 frames
+  // (~21.3 ms at 48 kHz or ~23.2 ms at 44.1 kHz), excluding device latency.
+  for (const rate of [48000, 44100]) {
+    const env = environment()
+    const session = new Session()
+    const pending = session.arm(120, () => {})
+    const context = env.contexts[0]
+    context.sampleRate = rate
+    env.requests[0].resolve(microphone())
+    await pending
+    const processor = context.nodes.find((node) => node instanceof MockProcessor) as MockProcessor
+    const block = new Float32Array(processor.bufferSize).fill(0.25)
+    const downbeat = 12.12
+    for (let index = 0; index < 16; index++) {
+      context.currentTime = downbeat + ((index + 1) * block.length) / rate
+      processor.onaudioprocess?.({ inputBuffer: { getChannelData: () => block } })
+    }
+    context.currentTime += (block.length - 1) / rate
+    const stoppedAfter = context.currentTime - downbeat
+    const take = session.finishTake()
+    assert.ok(take)
+    assert.equal(take.samples.length, 16 * 1024)
+    const missingTail = stoppedAfter - take.samples.length / take.sampleRate
+    assert.ok(missingTail > 0, 'the pending partial block remains unavailable')
+    assert.ok(missingTail < 1024 / rate, `undelivered tail exceeded one input block at ${rate} Hz`)
+    assert.ok(missingTail < 0.024)
   }
 
   // Stop while samples load must prevent playback from starting later.

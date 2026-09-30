@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "node scripts/check-music.ts && node scripts/check-pitch.ts && node scripts/check-engine.ts && node scripts/check-session.ts && node scripts/check-worker.ts"
+    "test": "node scripts/check-music.ts && node scripts/check-pitch.ts && node scripts/check-engine.ts && node scripts/check-session.ts && node scripts/check-worker.ts && node scripts/check-segmentation.ts && node scripts/check-wav.ts && node scripts/check-playback.ts",
+    "benchmark:vocadito": "node scripts/benchmark-vocadito.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

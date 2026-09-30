@@ -1,0 +1,5 @@
+.voice-review { gap: 10px 16px; }
+.voice-review-label { display: grid; gap: 3px; }
+.voice-review-label small { color: #6d5c4d; }
+.voice-review audio { flex: 1 1 260px; width: 100%; min-width: 0; height: 40px; }
+.voice-review p { flex-basis: 100%; font-size: 0.9rem; }

@@ -79,7 +79,8 @@ export class Session {
     this.stream = stream
 
     const source = context.createMediaStreamSource(this.stream)
-    const processor = context.createScriptProcessor(4096, 1, 1)
+    // Smaller blocks reduce Stop's nominal undelivered input tail (~21–23 ms).
+    const processor = context.createScriptProcessor(1024, 1, 1)
     const mute = context.createGain()
     mute.gain.value = 0
     processor.onaudioprocess = (event) => {
