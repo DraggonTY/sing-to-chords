@@ -7,10 +7,10 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node scripts/check-music.ts && node scripts/check-pitch.ts && node scripts/check-engine.ts && node scripts/check-session.ts && node scripts/check-worker.ts"
   },
   "dependencies": {
-    "@spotify/basic-pitch": "^1.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "soundfont-player": "^0.12.0"
@@ -23,5 +23,8 @@
     "oxlint": "^1.81.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   }
 }

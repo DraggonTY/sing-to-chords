@@ -70,7 +70,9 @@ export function makeChord(root: number, quality: Quality): Chord {
 }
 
 export function chordById(id: string): Chord | null {
-  const [rootText, quality] = id.split(':')
+  const parts = id.split(':')
+  if (parts.length !== 2 || !/^(?:[0-9]|1[01])$/.test(parts[0])) return null
+  const [rootText, quality] = parts
   const root = Number(rootText)
   if (!Number.isInteger(root) || root < 0 || root > 11) return null
   if (!isQuality(quality)) return null
@@ -78,25 +80,22 @@ export function chordById(id: string): Chord | null {
 }
 
 export function keyFromMelody(notes: { pitch: number; weight: number }[]): { key: KeySignature; confidence: number } {
-  let best: KeySignature = { tonic: 0, mode: 'major' }
-  let bestCost = Infinity
-  for (const mode of ['major', 'minor'] as const) {
-    for (let tonic = 0; tonic < 12; tonic++) {
-      let cost = 0
-      let weight = 0
-      for (const note of notes) {
-        cost += note.weight * nearestScaleDistance(note.pitch, tonic, mode) ** 2
-        weight += note.weight
-      }
-      const average = weight > 0 ? cost / weight : Infinity
-      if (average < bestCost) {
-        bestCost = average
-        best = { tonic, mode }
-      }
-    }
+  const valid = notes.filter((note) => Number.isFinite(note.pitch) && Number.isFinite(note.weight) && note.weight > 0)
+  const histogram = new Array<number>(12).fill(0)
+  for (const note of valid) histogram[pitchClass(Math.round(note.pitch))] += note.weight
+  const candidates = rankKeys(histogram)
+  if (!valid.length) return { key: { tonic: 0, mode: 'major' }, confidence: 0 }
+
+  // Phrase endpoints help distinguish relative keys with the same seven scale tones.
+  // These are deliberately small priors: a final passing tone must not decide the key.
+  const first = pitchClass(Math.round(valid[0].pitch))
+  const last = pitchClass(Math.round(valid[valid.length - 1].pitch))
+  for (const candidate of candidates) {
+    if (first === candidate.key.tonic) candidate.score += 0.025
+    if (last === candidate.key.tonic) candidate.score += 0.065
   }
-  const confidence = Math.max(0, Math.min(1, 1 - Math.sqrt(bestCost) / 0.55))
-  return { key: best, confidence }
+  candidates.sort((a, b) => b.score - a.score)
+  return { key: candidates[0].key, confidence: keyConfidence(histogram, candidates) }
 }
 
 export function intendedMidi(pitch: number, key: KeySignature): number {
@@ -119,40 +118,50 @@ export function intendedMidi(pitch: number, key: KeySignature): number {
   return chromatic
 }
 
-function nearestScaleDistance(pitch: number, tonic: number, mode: Mode): number {
-  const scale = mode === 'major' ? MAJOR_SCALE : MINOR_SCALE
-  let best = 6
-  const center = Math.round(pitch)
-  for (let midi = center - 2; midi <= center + 2; midi++) {
-    const degree = (((midi % 12) + 12) % 12 - tonic + 12) % 12
-    if (!scale.includes(degree)) continue
-    best = Math.min(best, Math.abs(pitch - midi))
+export type KeyCandidate = { key: KeySignature; score: number; correlation: number }
+
+/** Duration-weighted Krumhansl–Schmuckler profiles, with a small scale-fit term. */
+export function rankKeys(histogram: number[]): KeyCandidate[] {
+  const clean = Array.from({ length: 12 }, (_, index) => {
+    const value = histogram[index]
+    return Number.isFinite(value) && value > 0 ? value : 0
+  })
+  const total = clean.reduce((sum, value) => sum + value, 0)
+  const candidates: KeyCandidate[] = []
+  for (const mode of ['major', 'minor'] as const) {
+    const profile = mode === 'major' ? MAJOR_PROFILE : MINOR_PROFILE
+    const scale = mode === 'major' ? MAJOR_SCALE : MINOR_SCALE
+    for (let tonic = 0; tonic < 12; tonic++) {
+      const relative = clean.map((_, index) => clean[(tonic + index) % 12])
+      const correlation = pearson(relative, profile)
+      // Raised sixth and seventh are normal melodic/harmonic-minor vocabulary.
+      const inScale = relative.reduce((sum, value, degree) => sum + value * (
+        scale.includes(degree) ? 1 : mode === 'minor' && (degree === 9 || degree === 11) ? 0.7 : 0
+      ), 0)
+      candidates.push({ key: { tonic, mode }, correlation, score: correlation + (total ? 0.18 * inScale / total : 0) })
+    }
   }
-  return best
+  return candidates.sort((a, b) => b.score - a.score)
 }
 
 export function detectKey(histogram: number[]): { key: KeySignature; confidence: number } {
-  let best: KeySignature = { tonic: 0, mode: 'major' }
-  let bestScore = -Infinity
-  let second = -Infinity
+  const candidates = rankKeys(histogram)
+  return { key: candidates[0].key, confidence: keyConfidence(histogram, candidates) }
+}
 
-  for (const mode of ['major', 'minor'] as const) {
-    const profile = mode === 'major' ? MAJOR_PROFILE : MINOR_PROFILE
-    for (let tonic = 0; tonic < 12; tonic++) {
-      const relative = profile.map((_, index) => histogram[(tonic + index) % 12] ?? 0)
-      const score = pearson(relative, profile)
-      if (score > bestScore) {
-        second = bestScore
-        bestScore = score
-        best = { tonic, mode }
-      } else if (score > second) {
-        second = score
-      }
-    }
-  }
-
-  const confidence = Math.max(0, Math.min(1, (bestScore - Math.max(0, second)) / 0.18))
-  return { key: best, confidence: Number.isFinite(confidence) ? confidence : 0 }
+function keyConfidence(histogram: number[], candidates: KeyCandidate[]): number {
+  const clean = histogram.slice(0, 12).map((value) => Number.isFinite(value) && value > 0 ? value : 0)
+  const total = clean.reduce((sum, value) => sum + value, 0)
+  if (!total) return 0
+  const probabilities = clean.map((value) => value / total)
+  const effectiveClasses = 1 / probabilities.reduce((sum, value) => sum + value * value, 0)
+  const distinct = probabilities.filter((value) => value >= 0.025).length
+  // One held note cannot establish a major/minor key, however perfect its tuning.
+  const evidence = Math.min(1, Math.max(0, (effectiveClasses - 1) / 3), Math.max(0, (distinct - 1) / 3))
+  const separation = Math.min(1, Math.max(0, (candidates[0].score - candidates[1].score) / 0.18))
+  const fit = Math.min(1, Math.max(0, (candidates[0].correlation - 0.15) / 0.7))
+  // This is a heuristic certainty score, not a calibrated probability.
+  return Math.min(0.95, evidence * fit * separation)
 }
 
 export function rankChords(midi: number, key: KeySignature, previous: Chord | null): Chord[] {
@@ -252,18 +261,43 @@ export function rankChordsForGroup(
     .map((entry) => entry.chord)
 }
 
+/** A tonal palette; sevenths are available but the harmonizer charges for their complexity. */
+export function chordPalette(key: KeySignature): Chord[] {
+  const chords = new Map<string, Chord>()
+  for (const { chord } of diatonicTriads(key)) {
+    chords.set(chord.id, chord)
+    const degree = pitchClass(chord.root - key.tonic)
+    const dominantSeventh = degree === 7 || (key.mode === 'minor' && degree === 10)
+    const quality = dominantSeventh && chord.quality === 'maj'
+      ? '7'
+      : seventhFor(chord.quality)
+    if (quality) {
+      const seventh = makeChord(chord.root, quality)
+      chords.set(seventh.id, seventh)
+    }
+  }
+  return [...chords.values()]
+}
+
 export function voiceChord(chord: Chord, previous: number[] | null = null): number[] {
   const pitchClasses = INTERVALS[chord.quality].map((interval) => (chord.root + interval) % 12)
-  let best = placeVoicing(pitchClasses, 0)
-  if (!previous?.length) return best
-  const target = previous.reduce((sum, midi) => sum + midi, 0) / previous.length
-  let bestCost = movementCost(best, previous, target)
-  for (let inversion = 1; inversion < pitchClasses.length; inversion++) {
-    const candidate = placeVoicing(pitchClasses, inversion)
-    const cost = movementCost(candidate, previous, target)
-    if (cost < bestCost) {
-      best = candidate
-      bestCost = cost
+  const prior = previous?.filter(Number.isFinite).slice().sort((a, b) => a - b) ?? []
+  let best: number[] = []
+  let bestCost = Infinity
+  // Search inversions AND octaves. Restricting each inversion to one fixed octave
+  // causes avoidable jumps and can make identical average pitches hide moving voices.
+  for (let inversion = 0; inversion < pitchClasses.length; inversion++) {
+    const closed = placeVoicing(pitchClasses, inversion)
+    for (const shift of [-12, 0, 12]) {
+      const candidate = closed.map((midi) => midi + shift)
+      if (candidate[0] < 45 || candidate[candidate.length - 1] > 69) continue
+      const center = candidate.reduce((sum, midi) => sum + midi, 0) / candidate.length
+      const registerCost = Math.abs(center - 55) * 0.18 + Math.max(0, 48 - candidate[0]) * 0.65
+      const cost = registerCost + (prior.length ? movementCost(candidate, prior) : inversion === 0 ? 0 : 0.65)
+      if (cost < bestCost) {
+        best = candidate
+        bestCost = cost
+      }
     }
   }
   return best
@@ -379,9 +413,26 @@ function placeVoicing(pitchClasses: number[], inversion: number): number[] {
   return voiced
 }
 
-function movementCost(voiced: number[], previous: number[], target: number): number {
-  const average = voiced.reduce((sum, midi) => sum + midi, 0) / voiced.length
-  return Math.abs(average - target) + Math.abs(voiced[0] - previous[0]) * 0.35
+function movementCost(voiced: number[], previous: number[]): number {
+  const motion = (left: number, right: number) => {
+    const distance = Math.abs(left - right)
+    return distance + Math.max(0, distance - 5) * 0.6
+  }
+  // Ordered sequence alignment preserves voice order when a seventh enters/leaves.
+  // Equal-size chords pair voice-to-voice; centroid matching loses this information.
+  if (voiced.length === previous.length) {
+    return voiced.reduce((sum, midi, index) => sum + motion(midi, previous[index]), 0)
+  }
+  const costs = Array.from({ length: voiced.length + 1 }, () => new Array<number>(previous.length + 1).fill(Infinity))
+  costs[0][0] = 0
+  for (let row = 0; row <= voiced.length; row++) {
+    for (let col = 0; col <= previous.length; col++) {
+      if (row && col) costs[row][col] = Math.min(costs[row][col], costs[row - 1][col - 1] + motion(voiced[row - 1], previous[col - 1]))
+      if (row) costs[row][col] = Math.min(costs[row][col], costs[row - 1][col] + 5)
+      if (col) costs[row][col] = Math.min(costs[row][col], costs[row][col - 1] + 5)
+    }
+  }
+  return costs[voiced.length][previous.length]
 }
 
 function toneRole(root: number, quality: Quality, pc: number): number {
@@ -393,7 +444,7 @@ function toneRole(root: number, quality: Quality, pc: number): number {
 }
 
 function isQuality(value: string): value is Quality {
-  return value in INTERVALS
+  return Object.hasOwn(INTERVALS, value)
 }
 
 function pearson(left: number[], right: number[]): number {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Session, type PlayableNote } from './audio/session.ts'
 import { applyQuantize, analyzeNoteList, layoutChords, placeLabel, type ChordSlot, type ChordSpan, type QuantizeDivision } from './music/analyze.ts'
 import { transcribeSinging } from './music/transcribe.ts'
@@ -17,6 +17,7 @@ type Song = {
 
 export default function App() {
   const [studio] = useState(() => new Session())
+  const analysisRequest = useRef<AbortController | null>(null)
 
   const [bpm, setBpm] = useState(92)
   const [quantize, setQuantize] = useState<QuantizeDivision>('16')
@@ -42,6 +43,8 @@ export default function App() {
   useEffect(() => {
     return () => studio.cancel()
   }, [studio])
+
+  useEffect(() => () => analysisRequest.current?.abort(), [])
 
   async function startRecording() {
     setError(null)
@@ -74,8 +77,12 @@ export default function App() {
       setError('That stopped during the count-in. Let the metronome reach 1, then sing.')
       return
     }
-    void transcribeSinging(take.samples, take.sampleRate, bpm)
+    const request = new AbortController()
+    analysisRequest.current?.abort()
+    analysisRequest.current = request
+    void transcribeSinging(take.samples, take.sampleRate, bpm, request.signal)
       .then((analysis) => {
+        if (request.signal.aborted) return
         if (!analysis.notes.length) {
           setPhase('ready')
           setError('No clear melody came through. Use headphones, sing a little closer, and hold each note.')
@@ -92,9 +99,19 @@ export default function App() {
         setPhase('ready')
       })
       .catch(() => {
+        if (request.signal.aborted) return
         setPhase('ready')
-        setError('The melody model did not finish. Check your connection and record again.')
+        setError('The melody could not be analyzed. Try recording a shorter, clearer phrase.')
       })
+      .finally(() => {
+        if (analysisRequest.current === request) analysisRequest.current = null
+      })
+  }
+
+  function cancelAnalysis() {
+    analysisRequest.current?.abort()
+    analysisRequest.current = null
+    setPhase('ready')
   }
 
   function loadSample() {
@@ -121,7 +138,7 @@ export default function App() {
       ? notes.map((note) => ({
           midi: note.midi,
           startBeat: note.startBeat,
-          durationBeats: Math.min(note.durationBeats, 2),
+          durationBeats: note.durationBeats,
           velocity: 72,
         }))
       : []
@@ -240,8 +257,10 @@ export default function App() {
             <button className="stop" type="button" onClick={stopRecording}>
               Stop
             </button>
+          ) : phase === 'analyze' ? (
+            <button type="button" onClick={cancelAnalysis}>Cancel analysis</button>
           ) : (
-            <button className="record" type="button" disabled={phase === 'analyze'} onClick={startRecording}>
+            <button className="record" type="button" onClick={startRecording}>
               Record
             </button>
           )}
@@ -287,7 +306,7 @@ export default function App() {
           <span>
             {phase === 'ready' && !song
               ? 'Four clicks, then sing the whole tune. Every note you hold is kept.'
-              : 'Chords follow the melody. Beat, half bar, or bar sets how often the progression moves.'}
+              : 'Chords follow the whole phrase. Beat, half bar, or bar sets how often they can change.'}
           </span>
         </div>
       </section>
@@ -391,7 +410,7 @@ export default function App() {
                   <p className="eyebrow">Chord at {placeLabel(selected.startBeat)}</p>
                   <h3>{selected.chord.symbol}</h3>
                   <p>
-                    Supports the melody in {keyName(song.key)}. Notes on the beat decide it; quicker notes can pass through.
+                    Supports the melody in {keyName(song.key)}. Held notes and the surrounding chords shape the progression.
                   </p>
                 </div>
                 <div className="choices">
