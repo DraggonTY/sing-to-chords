@@ -1,10 +1,12 @@
 export type MelodyFrame = { time: number; pitch: number | null; energy?: number }
-export type SungSegment = { pitch: number; start: number; end: number }
+/** `pitch` is the note on the singer's own tuning grid; `sung` is the measured pitch. */
+export type SungSegment = { pitch: number; start: number; end: number; sung?: number }
 type VoicedFrame = MelodyFrame & { pitch: number }
 type PitchRun = { start: number; stop: number; pitch: number }
 
 const HALF_HOP = 0.005
-const CHANGE_COST = 6
+const CHANGE_COST = 9
+const MIN_FRAMES = 9
 
 /** Turn a continuous vocal contour into notes, rather than quantizing every excursion. */
 export function segmentSingingNotes(frames: MelodyFrame[], duration: number): SungSegment[] {
@@ -25,8 +27,11 @@ export function segmentSingingNotes(frames: MelodyFrame[], duration: number): Su
     .flatMap((note) => splitReattacks(note, frames))
 }
 
-function partition(group: VoicedFrame[], duration: number): SungSegment[] {
-  if (group.length < 7) return []
+function partition(sung: VoicedFrame[], duration: number): SungSegment[] {
+  if (sung.length < MIN_FRAMES) return []
+  // Decode on the singer's grid, not A440's: see phraseTuning.
+  const offset = phraseTuning(sung)
+  const group = offset ? sung.map((frame) => ({ ...frame, pitch: frame.pitch - offset })) : sung
   let low = Infinity
   let high = -Infinity
   for (const frame of group) {
@@ -97,9 +102,10 @@ function partition(group: VoicedFrame[], duration: number): SungSegment[] {
       after.start = split
     }
   }
-  return runs.filter((run, index) => !slides.has(index) && run.stop - run.start >= 7)
+  return runs.filter((run, index) => !slides.has(index) && run.stop - run.start >= MIN_FRAMES)
     .map((run) => ({
-      pitch: run.pitch,
+      pitch: run.pitch + offset,
+      sung: middlePitch(sung, run),
       start: Math.max(0, group[run.start].time - HALF_HOP),
       end: Math.min(duration, group[run.stop - 1].time + HALF_HOP),
     }))
@@ -149,10 +155,53 @@ function splitReattacks(note: SungSegment, frames: MelodyFrame[]): SungSegment[]
     const after = Math.max(...energy.slice(index + 3, index + 10))
     // Require a dip AND a recovery, relative to both surrounding vowels. A
     // quieter sustained phrase alone should not manufacture another onset.
-    if (energy[index] > 0.5 * Math.min(before, after)) continue
+    if (energy[index] > 0.6 * Math.min(before, after)) continue
     if (inside[index].time - (cuts[cuts.length - 1] ?? note.start) < 0.14) continue
     cuts.push(inside[index].time)
   }
   const edges = [note.start, ...cuts, note.end]
-  return edges.slice(0, -1).map((start, index) => ({ pitch: note.pitch, start, end: edges[index + 1] }))
+  return edges.slice(0, -1).map((start, index) => ({ ...note, start, end: edges[index + 1] }))
+}
+
+/**
+ * Unaccompanied singers drift away from A440. Where the settled part of a
+ * phrase sits between two keys, a fixed semitone grid flips one held note back
+ * and forth between its neighbours. Measure how far the phrase's steady pitch
+ * sits from the grid (a circular mean, so +49 and -49 cents agree).
+ */
+function phraseTuning(group: VoicedFrame[]): number {
+  // Average across a vibrato cycle first: the instants where vibrato stands
+  // still are its extremes, which sit well away from the note's centre.
+  const reach = 10
+  const centre = new Float64Array(group.length)
+  let sum = 0
+  let first = 0
+  let last = 0
+  for (let index = 0; index < group.length; index++) {
+    while (last < group.length && last <= index + reach) sum += group[last++].pitch
+    while (first < index - reach) sum -= group[first++].pitch
+    centre[index] = sum / (last - first)
+  }
+  let x = 0
+  let y = 0
+  let count = 0
+  for (let index = 3; index < group.length - 3; index++) {
+    // Glides between notes say nothing about where the notes sit.
+    if (Math.abs(centre[index + 3] - centre[index - 3]) > 0.12) continue
+    const angle = 2 * Math.PI * centre[index]
+    x += Math.cos(angle)
+    y += Math.sin(angle)
+    count++
+  }
+  // Without a consistent offset, keep the standard grid.
+  if (count < 8 || Math.hypot(x, y) / count < 0.35) return 0
+  return Math.atan2(y, x) / (2 * Math.PI)
+}
+
+function middlePitch(group: VoicedFrame[], run: PitchRun): number {
+  const trim = Math.floor((run.stop - run.start) * 0.2)
+  const middle: number[] = []
+  for (let index = run.start + trim; index < run.stop - trim; index++) middle.push(group[index].pitch)
+  middle.sort((a, b) => a - b)
+  return middle[Math.floor(middle.length / 2)]
 }

@@ -1,4 +1,4 @@
-import { segmentSingingNotes, type MelodyFrame } from './segment.ts'
+import { segmentSingingNotes, type MelodyFrame, type SungSegment } from './segment.ts'
 import type { RawNote } from './theory.ts'
 
 // YIN/MPM periodicity with threshold-weighted alternatives and temporal decoding.
@@ -23,13 +23,37 @@ export function extractSingingNotes(samples: Float32Array, sampleRate: number, b
   if (samples.length / sampleRate < 0.07) return []
   const audio = prepareAudio(samples, sampleRate)
   const frames = measureFrames(audio)
-  const notes = segmentSingingNotes(decode(frames), samples.length / sampleRate)
+  const notes = dropStrayNotes(segmentSingingNotes(decode(frames), samples.length / sampleRate))
   return notes.map((note, index) => {
-    const midi = Math.round(note.pitch)
+    const midi = Math.round(note.sung ?? note.pitch)
     const startBeat = round3(note.start * bpm / 60)
     const durationBeats = round3((note.end - note.start) * bpm / 60)
-    return { id: `n${index}-${midi}-${Math.round(startBeat * 1000)}`, midi, startBeat, durationBeats }
+    return { id: `n${index}-${midi}-${Math.round(startBeat * 1000)}`, midi, startBeat, durationBeats, sungPitch: round3(note.sung ?? note.pitch) }
   }).filter((note) => note.durationBeats > 0)
+}
+
+/**
+ * A brief note far below (or above) everything around it is not the singer:
+ * it is an octave slip on a rough entry, a breath, or another instrument
+ * leaking into the recording. Real leaps of this size are held, or stay there.
+ */
+function dropStrayNotes(notes: SungSegment[]): SungSegment[] {
+  if (notes.length < 8) return notes
+  const weighted = notes.map((note) => ({ pitch: note.sung ?? note.pitch, weight: note.end - note.start }))
+    .sort((a, b) => a.pitch - b.pitch)
+  const total = weighted.reduce((sum, entry) => sum + entry.weight, 0)
+  let running = 0
+  let centre = weighted[0].pitch
+  for (const entry of weighted) {
+    running += entry.weight
+    if (running >= total / 2) { centre = entry.pitch; break }
+  }
+  return notes.filter((note, index) => {
+    const pitch = note.sung ?? note.pitch
+    if (note.end - note.start >= 0.45 || (pitch > centre - 10 && pitch < centre + 14)) return true
+    const apart = (other: SungSegment | undefined) => !other || Math.abs((other.sung ?? other.pitch) - pitch) >= 8
+    return !(apart(notes[index - 1]) && apart(notes[index + 1]))
+  })
 }
 
 function prepareAudio(input: Float32Array, sampleRate: number): Float32Array {

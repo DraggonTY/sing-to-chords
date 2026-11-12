@@ -88,8 +88,9 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .segmented button {
   flex: 1;
   text-align: center;
+  white-space: nowrap;
   border-radius: 999px;
-  padding: 0.4rem 0.2rem;
+  padding: 0.4rem 0.55rem;
   background: transparent;
   color: #241c16;
 }

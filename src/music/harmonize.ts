@@ -30,6 +30,7 @@ export function harmonizeMelody(
   key: KeySignature,
   edits: Record<string, string>,
   span: 1 | 2 | 4,
+  rich = false,
 ): HarmonySlot[] {
   const valid = notes.filter((note) => Number.isFinite(note.midi) && Number.isFinite(note.startBeat)
     && Number.isFinite(note.durationBeats) && note.durationBeats > 0 && note.startBeat + note.durationBeats > 0)
@@ -72,7 +73,7 @@ export function harmonizeMelody(
 
   for (let index = 0; index < windows.length; index++) {
     const window = windows[index]
-    window.scores = window.candidates.map((chord) => melodyScore(chord, window, key, index === 0, index === windows.length - 1))
+    window.scores = window.candidates.map((chord) => melodyScore(chord, window, key, index === 0, index === windows.length - 1, rich))
   }
 
   const forward: number[][] = []
@@ -120,8 +121,10 @@ export function harmonizeMelody(
   })
 }
 
-function melodyScore(chord: Chord, window: HarmonyWindow, key: KeySignature, first: boolean, last: boolean): number {
+function melodyScore(chord: Chord, window: HarmonyWindow, key: KeySignature, first: boolean, last: boolean, rich: boolean): number {
   let hit = 0
+  let rub = 0
+  const seventh = chord.tones.length > 3 ? chord.tones[3] : -1
   let miss = 0
   let clash = 0
   for (const note of window.notes) {
@@ -131,6 +134,8 @@ function melodyScore(chord: Chord, window: HarmonyWindow, key: KeySignature, fir
     // Duration is clipped to THIS window. Short offbeat passing tones count less.
     const passing = note.durationBeats < 0.75 && !onBeat
     const weight = note.durationBeats * (passing ? 0.55 : 1) * (strongAttack ? 1.3 : onBeat ? 1.12 : 1)
+    // A sung root a semitone above a major seventh grinds against the piano.
+    if (!passing && seventh >= 0 && pitchClass(pc - seventh) === 1) rub += weight
     if (chord.tones.includes(pc)) hit += weight
     else {
       miss += weight
@@ -146,7 +151,11 @@ function melodyScore(chord: Chord, window: HarmonyWindow, key: KeySignature, fir
   else if (degree === 5 || degree === 7) score += 0.24
   else if (degree === 2 || degree === 9 || (key.mode === 'minor' && degree === 8)) score += 0.06
   if (chord.quality === 'dim' || chord.quality === 'aug') score -= 0.45
-  if (chord.tones.length > 3) score -= 0.8
+  // Sevenths cost complexity by default. The richer setting charges far less where
+  // the added tone does not rub against the melody, and keeps the final tonic plain.
+  if (chord.tones.length > 3) {
+    score -= rich ? (last && degree === 0 ? 0.8 : 0.15) + 2.4 * rub / Math.max(total, 1e-8) : 0.8
+  }
   if (first && tonic) score += 0.3
   const ending = window.notes.reduce((latest, note) => note.startBeat + note.durationBeats > latest.startBeat + latest.durationBeats ? note : latest)
   if (last && tonic && pitchClass(Math.round(ending.midi)) === key.tonic) score += 0.85

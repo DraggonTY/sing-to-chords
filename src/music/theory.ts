@@ -21,6 +21,8 @@ export type RawNote = {
   midi: number
   startBeat: number
   durationBeats: number
+  /** Measured pitch in fractional MIDI, when the note came from a recording. */
+  sungPitch?: number
 }
 
 const INTERVALS: Record<Quality, number[]> = {

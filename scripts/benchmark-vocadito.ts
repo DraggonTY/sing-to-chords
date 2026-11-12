@@ -16,7 +16,7 @@ type Note = { start: number; end: number; pitch: number }
 type MatchScore = { matched: number; estimated: number; reference: number; unmatchedEstimates: number; unmatchedReferences: number; precision: number; recall: number; f1: number }
 type Scores = { note: MatchScore; fullNote: MatchScore; onset: MatchScore }
 type Report = { track: number; singer: string; seconds: number; estimatedNotes: number; A1: Scores; A2: Scores }
-type Engine = { extractSingingNotes: (audio: Float32Array, rate: number, bpm: number) => Array<{ midi: number; startBeat: number; durationBeats: number }> }
+type Engine = { extractSingingNotes: (audio: Float32Array, rate: number, bpm: number) => Array<{ midi: number; sungPitch?: number; startBeat: number; durationBeats: number }> }
 const args = process.argv.slice(2)
 function option(name: string, fallback?: string): string | undefined {
   const index = args.indexOf(name)
@@ -26,6 +26,10 @@ function option(name: string, fallback?: string): string | undefined {
 }
 const dataset = option('--dataset')
 if (!dataset) throw new Error('Provide --dataset pointing to the extracted vocadito v3 directory (Audio/, Annotations/, vocadito_metadata.csv).')
+// 'key' scores the semitone the app displays; 'sung' scores the measured pitch
+// (an engine without sungPitch falls back to its semitone).
+const pitchMode = option('--pitch', 'key')
+if (pitchMode !== 'key' && pitchMode !== 'sung') throw new Error('--pitch must be key or sung.')
 const split = option('--split', 'dev')
 if (split !== 'dev' && split !== 'holdout') throw new Error('--split must be dev or holdout.')
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
@@ -138,7 +142,7 @@ const reports: Report[] = []
 for (const { track, singer } of selected) {
   const { samples, sampleRate } = readWav(path.join(dataset, 'Audio', `vocadito_${track}.wav`))
   // At 60 BPM, the public API's beats equal seconds. No UI quantization is used.
-  const notes = engine.extractSingingNotes(samples, sampleRate, 60).map((note) => ({ start: note.startBeat, end: note.startBeat + note.durationBeats, pitch: note.midi }))
+  const notes = engine.extractSingingNotes(samples, sampleRate, 60).map((note) => ({ start: note.startBeat, end: note.startBeat + note.durationBeats, pitch: pitchMode === 'sung' ? note.sungPitch ?? note.midi : note.midi }))
   const report: Report = { track, singer, seconds: samples.length / sampleRate, estimatedNotes: notes.length, A1: scores(referenceNotes(track, 1), notes), A2: scores(referenceNotes(track, 2), notes) }
   reports.push(report)
   console.error(`vocadito_${track}: notes ${notes.length}/${report.A2.note.reference} A2; note F1 ${report.A2.note.f1.toFixed(3)}; onset F1 ${report.A2.onset.f1.toFixed(3)}`)
@@ -161,7 +165,7 @@ const result = {
   dataset: 'vocadito v3', source: 'https://zenodo.org/records/5578807', license: 'CC-BY-4.0',
   engineFile: enginePath, engineFileSHA256: createHash('sha256').update(source).digest('hex'),
   sourceFingerprint,
-  split, splitRule: 'Sort unique singer IDs by SHA256(vocadito-v3-segmentation-v1:<singer>); even indexes dev, odd indexes holdout.',
+  pitchMode, split, splitRule: 'Sort unique singer IDs by SHA256(vocadito-v3-segmentation-v1:<singer>); even indexes dev, odd indexes holdout.',
   singers: [...selectedSingers].sort(), trackCount: reports.length,
   tolerances: { onsetSeconds: 0.05, pitchCents: 50, offsetMinimumSeconds: 0.05, offsetDurationRatio: 0.2 },
   A1: aggregate('A1'), A2: aggregate('A2'), tracks: reports,

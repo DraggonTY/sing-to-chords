@@ -5,7 +5,8 @@ import { encodeMonoWav } from './audio/wav.ts'
 import { applyQuantize, analyzeNoteList, layoutChords, placeLabel, type ChordSlot, type ChordSpan, type QuantizeDivision } from './music/analyze.ts'
 import { transcribeSinging } from './music/transcribe.ts'
 import { sampleTune, sampleWords } from './music/demo.ts'
-import { chordEvents, encodePianoMidi } from './music/midi.ts'
+import { PIANO_STYLES, pianoEvents, type PianoStyle } from './music/accompany.ts'
+import { encodePianoMidi } from './music/midi.ts'
 import { PITCH_NAMES, confidenceLabel, keyName, noteName, type KeySignature, type Mode } from './music/theory.ts'
 import './RecordingReview.css'
 
@@ -32,6 +33,9 @@ export default function App() {
   const [bpm, setBpm] = useState(92)
   const [quantize, setQuantize] = useState<QuantizeDivision>('16')
   const [span, setSpan] = useState<ChordSpan>(2)
+  const [style, setStyle] = useState<PianoStyle>('block')
+  const [rich, setRich] = useState(false)
+  const [melodyInMidi, setMelodyInMidi] = useState(false)
   const [pianoMessage, setPianoMessage] = useState<string | null>(null)
   const [hearMelody, setHearMelody] = useState(true)
   const [clickOnPlay, setClickOnPlay] = useState(true)
@@ -45,8 +49,8 @@ export default function App() {
 
   const notes = useMemo(() => (song ? applyQuantize(song.raw, quantize) : []), [song, quantize])
   const slots = useMemo(
-    () => (song ? layoutChords(notes, song.key, song.edits, span) : []),
-    [song, notes, span],
+    () => (song ? layoutChords(notes, song.key, song.edits, span, rich) : []),
+    [song, notes, span, rich],
   )
   const selected = slots.find((slot) => slot.id === selectedId) ?? slots[0] ?? null
 
@@ -180,7 +184,7 @@ export default function App() {
     if (!song || !(melodyOnly ? song.raw.length : slots.length)) return
     originalVoice.current?.pause()
     const request = ++playbackRequest.current
-    const plan = makePlaybackPlan(song, { notes, chords: slots, bpm, hearMelody, withClick: clickOnPlay }, melodyOnly)
+    const plan = makePlaybackPlan(song, { notes, chords: slots, bpm, hearMelody, withClick: clickOnPlay, style }, melodyOnly)
     setPianoMessage('Loading the piano…')
     setError(null)
     try {
@@ -203,14 +207,14 @@ export default function App() {
 
   function exportMidi() {
     if (!slots.length) return
-    const bytes = encodePianoMidi(chordEvents(slots), bpm)
+    const bytes = encodePianoMidi(pianoEvents(slots, style), bpm, melodyInMidi ? notes : [])
     const copy = new ArrayBuffer(bytes.byteLength)
     new Uint8Array(copy).set(bytes)
     const blob = new Blob([copy], { type: 'audio/midi' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = 'sing-to-chords-piano.mid'
+    link.download = melodyInMidi ? 'sing-to-chords-piano-and-melody.mid' : 'sing-to-chords-piano.mid'
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 1500)
   }
@@ -300,6 +304,25 @@ export default function App() {
           ))}
         </div>
 
+        <div className="segmented" role="group" aria-label="Piano style">
+          <span>Piano</span>
+          {PIANO_STYLES.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={style === value ? 'on' : ''}
+              aria-pressed={style === value}
+              disabled={busy}
+              onClick={() => {
+                stopPiano()
+                setStyle(value)
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div className="buttons">
           {phase === 'record' || phase === 'count' ? (
             <button className="stop" type="button" onClick={stopRecording}>
@@ -341,6 +364,14 @@ export default function App() {
         <label>
           <input type="checkbox" checked={clickOnPlay} onChange={(event) => setClickOnPlay(event.target.checked)} />
           Metronome on playback
+        </label>
+        <label>
+          <input type="checkbox" checked={rich} onChange={(event) => setRich(event.target.checked)} />
+          Richer chords (7ths)
+        </label>
+        <label>
+          <input type="checkbox" checked={melodyInMidi} onChange={(event) => setMelodyInMidi(event.target.checked)} />
+          Include the melody in the MIDI file
         </label>
         <p>Wear headphones so the click stays out of the recording.</p>
       </div>

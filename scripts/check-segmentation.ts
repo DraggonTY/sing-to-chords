@@ -77,6 +77,12 @@ const repeated = check('rearticulated equal notes without silence', voice(1.3,
 assert.ok(Math.abs(repeated[1].startBeat / 2 - 0.41) < 0.04)
 assert.ok(Math.abs(repeated[2].startBeat / 2 - 0.86) < 0.04)
 
+// A singer who has drifted half a semitone from A440 holds one unsteady note
+// centred between two keys. The fixed A440 grid reported [61, 60, 61, 60, 61].
+const between = check('held note between two keys', voice(1.8, (time) => 60.5 + 0.3 * Math.sin(2 * Math.PI * 1.5 * time)), [60])
+assert.ok(Math.abs(between[0].sungPitch! - 60.5) < 0.15, `measured pitch ${between[0].sungPitch}`)
+assert.ok(between[0].durationBeats / 2 > 1.6, 'the whole held note is one event')
+
 const frames: MelodyFrame[] = Array.from({ length: 60 }, (_, index) => ({ time: index / 100, pitch: 64, energy: 0.1 }))
 const uncertain = frames.map((frame, index) => ({ ...frame, pitch: index === 25 || index === 26 ? null : frame.pitch }))
 assert.equal(segmentSingingNotes(uncertain, 0.6).length, 1, 'brief uncertain frames should not split a held note')
