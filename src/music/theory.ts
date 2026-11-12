@@ -35,9 +35,13 @@ const INTERVALS: Record<Quality, number[]> = {
   min7: [0, 3, 7, 10],
 }
 
-const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+// Aarden–Essen profiles: scale-degree use in sung folk melodies. The Krumhansl–
+// Kessler probe-tone ratings used before describe harmony, and hear a tune that
+// dwells on its third (Mary Had a Little Lamb) as the minor key on that note.
+const MAJOR_PROFILE = [17.7661, 0.145624, 14.9265, 0.160186, 19.8049, 11.3587, 0.291248, 22.062, 0.145624, 8.15494, 0.232998, 4.95122]
+const MINOR_PROFILE = [18.2648, 0.737619, 14.0499, 16.8599, 0.702494, 14.4362, 0.702494, 18.6161, 4.56621, 1.93186, 7.37619, 1.75623]
 
+const REST_WEIGHT = 0.06
 const MAJOR_SCALE = [0, 2, 4, 5, 7, 9, 11]
 const MAJOR_QUALITIES: Quality[] = ['maj', 'min', 'min', 'maj', 'maj', 'min', 'dim']
 const MAJOR_WEIGHTS = [6, 3.2, 2.1, 5, 6, 4.7, 1.3]
@@ -81,7 +85,12 @@ export function chordById(id: string): Chord | null {
   return makeChord(root, quality)
 }
 
-export function keyFromMelody(notes: { pitch: number; weight: number }[]): { key: KeySignature; confidence: number } {
+/**
+ * `rests` are the pitches on which phrases come to rest (before a breath, and at
+ * the end). Tunes rest on the notes of the home chord, above all the keynote,
+ * and hardly ever on the second, fourth, sixth or seventh degree.
+ */
+export function keyFromMelody(notes: { pitch: number; weight: number }[], rests: number[] = []): { key: KeySignature; confidence: number } {
   const valid = notes.filter((note) => Number.isFinite(note.pitch) && Number.isFinite(note.weight) && note.weight > 0)
   const histogram = new Array<number>(12).fill(0)
   for (const note of valid) histogram[pitchClass(Math.round(note.pitch))] += note.weight
@@ -95,6 +104,15 @@ export function keyFromMelody(notes: { pitch: number; weight: number }[]): { key
   for (const candidate of candidates) {
     if (first === candidate.key.tonic) candidate.score += 0.025
     if (last === candidate.key.tonic) candidate.score += 0.065
+    if (rests.length) {
+      const third = candidate.key.mode === 'major' ? 4 : 3
+      let resting = 0
+      for (const pitch of rests) {
+        const degree = pitchClass(Math.round(pitch) - candidate.key.tonic)
+        resting += degree === 0 ? 1 : degree === 7 ? 0.55 : degree === third ? 0.45 : -0.5
+      }
+      candidate.score += REST_WEIGHT * resting / rests.length
+    }
   }
   candidates.sort((a, b) => b.score - a.score)
   return { key: candidates[0].key, confidence: keyConfidence(histogram, candidates) }

@@ -15,15 +15,24 @@ type PitchFrame = MelodyFrame
 
 /** Extract one sung melody, retaining the recording's original timing. */
 export function extractSingingNotes(samples: Float32Array, sampleRate: number, bpm: number): RawNote[] {
+  if (!checkRecording(samples, sampleRate, bpm)) return []
+  const audio = prepareAudio(samples, sampleRate)
+  return notesFromPitch(decode(measureFrames(audio)), samples.length / sampleRate, bpm)
+}
+
+/** Validate a recording. False means it is too short to hold a note. */
+export function checkRecording(samples: Float32Array, sampleRate: number, bpm: number): boolean {
   if (!Number.isFinite(sampleRate) || sampleRate < 4000 || sampleRate > 384000) {
     throw new RangeError('Unsupported audio sample rate.')
   }
   if (!Number.isFinite(bpm) || bpm <= 0) throw new RangeError('Tempo must be a positive number.')
   if (samples.length / sampleRate > 600) throw new RangeError('Please use a recording under 10 minutes.')
-  if (samples.length / sampleRate < 0.07) return []
-  const audio = prepareAudio(samples, sampleRate)
-  const frames = measureFrames(audio)
-  const notes = dropStrayNotes(segmentSingingNotes(decode(frames), samples.length / sampleRate))
+  return samples.length / sampleRate >= 0.07
+}
+
+/** Turn a pitch contour (one frame per 10 ms, from any pitch tracker) into notes. */
+export function notesFromPitch(contour: MelodyFrame[], seconds: number, bpm: number): RawNote[] {
+  const notes = dropStrayNotes(segmentSingingNotes(contour, seconds))
   return notes.map((note, index) => {
     const midi = Math.round(note.sung ?? note.pitch)
     const startBeat = round3(note.start * bpm / 60)
@@ -56,19 +65,20 @@ function dropStrayNotes(notes: SungSegment[]): SungSegment[] {
   })
 }
 
-function prepareAudio(input: Float32Array, sampleRate: number): Float32Array {
+/** Remove DC and rumble and resample (default: to the built-in tracker's rate). */
+export function prepareAudio(input: Float32Array, sampleRate: number, target: number = RATE): Float32Array {
   // Remove DC without normalizing near-silence into a note.
   let mean = 0
   for (const value of input) mean += Number.isFinite(value) ? value : 0
   mean /= input.length
   const clean = new Float32Array(input.length)
   for (let index = 0; index < input.length; index++) clean[index] = Number.isFinite(input[index]) ? input[index] - mean : 0
-  const output = new Float32Array(Math.floor(input.length * RATE / sampleRate))
-  if (sampleRate === RATE) output.set(clean)
+  const output = new Float32Array(Math.floor(input.length * target / sampleRate))
+  if (sampleRate === target) output.set(clean)
   else {
     // Windowed-sinc low-pass interpolation prevents high harmonics/noise from
-    // aliasing into the vocal range and handles input rates below RATE too.
-    const scale = Math.min(1, RATE / sampleRate)
+    // aliasing into the vocal range and handles input rates below the target too.
+    const scale = Math.min(1, target / sampleRate)
     const radius = Math.ceil(12 / scale)
     const cutoff = 0.45 * scale
     // Cache fractional-delay filters so each audio sample only needs multiplies.
@@ -90,7 +100,7 @@ function prepareAudio(input: Float32Array, sampleRate: number): Float32Array {
       filters.push(filter)
     }
     for (let index = 0; index < output.length; index++) {
-      const position = index * sampleRate / RATE
+      const position = index * sampleRate / target
       const base = Math.floor(position)
       const filter = filters[Math.min(phaseCount - 1, Math.floor((position - base) * phaseCount))]
       let sum = 0
@@ -102,7 +112,7 @@ function prepareAudio(input: Float32Array, sampleRate: number): Float32Array {
       output[index] = sum
     }
   }
-  const alpha = 1 / (1 + 2 * Math.PI * 35 / RATE)
+  const alpha = 1 / (1 + 2 * Math.PI * 35 / target)
   let previousInput = 0
   let previousOutput = 0
   for (let index = 0; index < output.length; index++) {
@@ -114,9 +124,21 @@ function prepareAudio(input: Float32Array, sampleRate: number): Float32Array {
   return output
 }
 
-function measureFrames(audio: Float32Array): Frame[] {
-  const frames: Frame[] = []
-  const frame = new Float32Array(WINDOW)
+/**
+ * Is there a noise floor close under the voice? Compares the loud frames with
+ * the quiet ones (the gaps between phrases). In a clean recording the gaps are
+ * 35 dB or more below the singing; with room noise they sit within 20 dB.
+ */
+export function soundsNoisy(samples: Float32Array, sampleRate: number): boolean {
+  const energies = frameEnergies(prepareAudio(samples, sampleRate)).sort((a, b) => a - b)
+  if (energies.length < 50) return false
+  const loud = energies[Math.floor(energies.length * 0.9)]
+  const quiet = Math.max(1e-7, energies[Math.floor(energies.length * 0.1)])
+  return 20 * Math.log10(loud / quiet) < 21
+}
+
+/** Loudness of each 10 ms frame of prepared (12 kHz) audio. */
+export function frameEnergies(audio: Float32Array): number[] {
   const energies: number[] = []
   for (let center = 0; center < audio.length; center += HOP) {
     let power = 0
@@ -125,6 +147,13 @@ function measureFrames(audio: Float32Array): Frame[] {
     for (let index = start; index < end; index++) power += audio[index] * audio[index]
     energies.push(Math.sqrt(power / Math.max(1, end - start)))
   }
+  return energies
+}
+
+function measureFrames(audio: Float32Array): Frame[] {
+  const frames: Frame[] = []
+  const frame = new Float32Array(WINDOW)
+  const energies = frameEnergies(audio)
   const sorted = [...energies].sort((a, b) => a - b)
   // A relative gate retains soft phrases; periodicity rejects even loud breath.
   const gate = Math.max(0.00003, (sorted[Math.floor(sorted.length * 0.9)] ?? 0) * 0.018)

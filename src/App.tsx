@@ -19,6 +19,7 @@ type Song = {
   raw: ReturnType<typeof analyzeNoteList>['notes']
   recordedBpm: number
   takeId?: number
+  engine?: 'neural' | 'built-in'
 }
 type SavedTake = RecordedTake & { id: number; bpm: number; url: string; free: boolean }
 
@@ -136,6 +137,7 @@ export default function App() {
     void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal)
       .then((analysis) => {
         if (request.signal.aborted) return
+        if (analysis.engineError) console.warn('Neural pitch engine unavailable, using the built-in one:', analysis.engineError)
         const found = free && analysis.bpm ? analysis.bpm : savedTake.bpm
         if (free && analysis.notes.length) {
           setLastTake((current) => (current?.id === savedTake.id ? { ...current, bpm: found } : current))
@@ -157,6 +159,7 @@ export default function App() {
           raw: analysis.notes,
           recordedBpm: found,
           takeId: savedTake.id,
+          engine: analysis.engine,
         })
         setSelectedId(null)
         setPhase('ready')
@@ -474,6 +477,7 @@ export default function App() {
           {phase === 'ready' && song && (
             <strong>
               {song.source === 'sample' ? 'Sample tune' : 'Recorded melody'} · {notes.length} notes
+              {song.engine === 'neural' ? ' · noisy recording, neural pitch engine' : ''}
             </strong>
           )}
           {phase === 'ready' && !song && <strong>Ready when you are</strong>}

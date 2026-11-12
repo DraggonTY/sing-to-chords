@@ -22,6 +22,10 @@ export type Analysis = {
   /** Set when the tempo was found from the singing instead of a click. */
   bpm?: number
   beatConfidence?: number
+  /** Which pitch tracker produced the notes. */
+  engine?: 'neural' | 'built-in'
+  /** Why the neural tracker was not used, for diagnosis. */
+  engineError?: string
 }
 
 // Live transcription and the synchronous API deliberately share the same engine.
@@ -34,7 +38,11 @@ export function analyzeRecording(samples: Float32Array, sampleRate: number, bpm:
  * singer's own pulse, and place the notes on it.
  */
 export function analyzeFreely(samples: Float32Array, sampleRate: number): Analysis {
-  const inSeconds = extractSingingNotes(samples, sampleRate, 60)
+  return analysisOnFoundBeat(extractSingingNotes(samples, sampleRate, 60))
+}
+
+/** As analyzeFreely, for notes already transcribed in seconds (that is, at 60 BPM). */
+export function analysisOnFoundBeat(inSeconds: RawNote[]): Analysis {
   const map = findBeat(inSeconds.map((note) => ({ start: note.startBeat, end: note.startBeat + note.durationBeats })))
   // Too little to find a pulse: keep seconds as beats (60 BPM) so nothing is lost.
   if (!map) return { ...analysisFromNotes(inSeconds), bpm: 60, beatConfidence: 0 }
@@ -47,9 +55,46 @@ export function analyzeNoteList(notes: RawNote[]): Analysis {
 
 export function analysisFromNotes(input: RawNote[]): Analysis {
   const tuned = retune(cleanNotes(input))
-  const detected = keyFromMelody(tuned.map((note) => ({ pitch: note.midi, weight: note.durationBeats })))
-  const notes = settleInKey(tuned, detected.key)
-  return { ...detected, notes }
+  // Where phrases come to rest: before a breath of most of a beat, and at the end.
+  const rests = tuned.filter((note, index) => {
+    const next = tuned[index + 1]
+    return !next || next.startBeat - (note.startBeat + note.durationBeats) >= 0.75
+  }).map((note) => note.midi)
+  const heard = keyFromMelody(tuned.map((note) => ({ pitch: note.midi, weight: note.durationBeats })), rests)
+  const settled = settleInKey(tuned, heard.key)
+  return plainerKey({ ...heard, notes: settled })
+}
+
+// Sharps or flats in each major key's signature, by tonic.
+const SIGNATURE = [0, 5, 2, 3, 4, 1, 6, 1, 4, 3, 2, 5]
+const accidentals = (key: KeySignature) => SIGNATURE[(key.tonic + (key.mode === 'minor' ? 3 : 0)) % 12]
+
+/**
+ * Someone singing alone has no reference pitch, so a tune often lands between
+ * two keys: a third of a semitone under E flat minor is as much D minor, sung
+ * sharp. When the voice sits that far from the piano's tuning, name the tune in
+ * whichever neighbouring key has the plainer signature and the easier chords.
+ */
+function plainerKey(analysis: Analysis): Analysis {
+  const sung = analysis.notes.filter((note) => note.sungPitch !== undefined && Number.isFinite(note.sungPitch))
+  if (sung.length < 4) return analysis
+  let x = 0
+  let y = 0
+  let weight = 0
+  for (const note of sung) {
+    const w = Math.min(2, note.durationBeats)
+    x += w * Math.cos(2 * Math.PI * (note.sungPitch! - note.midi))
+    y += w * Math.sin(2 * Math.PI * (note.sungPitch! - note.midi))
+    weight += w
+  }
+  if (Math.hypot(x, y) / weight < 0.3) return analysis
+  const offset = Math.atan2(y, x) / (2 * Math.PI)
+  if (Math.abs(offset) < 0.25) return analysis
+  const step = offset < 0 ? -1 : 1
+  const neighbour: KeySignature = { tonic: (analysis.key.tonic + step + 12) % 12, mode: analysis.key.mode }
+  if (accidentals(neighbour) >= accidentals(analysis.key)) return analysis
+  if (analysis.notes.some((note) => note.midi + step < 0 || note.midi + step > 127)) return analysis
+  return { ...analysis, key: neighbour, notes: analysis.notes.map((note) => ({ ...note, midi: note.midi + step })) }
 }
 
 const MAJOR = [0, 2, 4, 5, 7, 9, 11]
@@ -64,24 +109,34 @@ const MINOR = [0, 2, 3, 5, 7, 8, 10, 11]
 function retune(notes: RawNote[]): RawNote[] {
   const sung = notes.filter((note) => note.sungPitch !== undefined && Number.isFinite(note.sungPitch))
   if (sung.length < 4) return notes
-  return notes.map((note) => {
-    if (note.sungPitch === undefined || !Number.isFinite(note.sungPitch)) return note
-    // Circular mean of the offsets from the semitone grid, weighted towards
-    // long notes and towards this note's neighbourhood.
+  // Offsets from the semitone grid live on a circle: 49 cents sharp and 49 cents
+  // flat are neighbours. Take the whole take's offset first, then let each
+  // note's neighbourhood drift around it. Measuring each neighbourhood on its
+  // own lets a singer near the half-way point flip between "sharp" and "flat"
+  // from note to note, which names the same sung pitch as two different keys.
+  const circular = (weightOf: (other: RawNote) => number) => {
     let x = 0
     let y = 0
     let weight = 0
     for (const other of sung) {
-      const distance = (other.startBeat - note.startBeat) / 24
-      const w = Math.min(2, other.durationBeats) * (0.25 + Math.exp(-distance * distance))
-      const angle = 2 * Math.PI * other.sungPitch!
-      x += w * Math.cos(angle)
-      y += w * Math.sin(angle)
+      const w = weightOf(other)
+      x += w * Math.cos(2 * Math.PI * other.sungPitch!)
+      y += w * Math.sin(2 * Math.PI * other.sungPitch!)
       weight += w
     }
-    if (Math.hypot(x, y) / weight < 0.3) return note
-    const offset = Math.atan2(y, x) / (2 * Math.PI)
-    const midi = Math.round(note.sungPitch - offset) + Math.round(offset)
+    return { offset: Math.atan2(y, x) / (2 * Math.PI), strength: Math.hypot(x, y) / weight }
+  }
+  const whole = circular((other) => Math.min(2, other.durationBeats))
+  if (whole.strength < 0.3) return notes
+  return notes.map((note) => {
+    if (note.sungPitch === undefined || !Number.isFinite(note.sungPitch)) return note
+    const near = circular((other) => {
+      const distance = (other.startBeat - note.startBeat) / 24
+      return Math.min(2, other.durationBeats) * (0.25 + Math.exp(-distance * distance))
+    })
+    // The local offset, expressed as a small departure from the whole take's.
+    const drift = near.strength < 0.3 ? 0 : near.offset - whole.offset - Math.round(near.offset - whole.offset)
+    const midi = Math.round(note.sungPitch - (whole.offset + drift))
     return midi === note.midi || midi < 0 || midi > 127 ? note : { ...note, midi }
   })
 }

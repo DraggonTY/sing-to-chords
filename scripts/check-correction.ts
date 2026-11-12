@@ -18,6 +18,15 @@ const retuned = midis(analysisFromNotes(sharp).notes)
 assert.ok(retuned.every((midi, index) => midi - tune[index] === retuned[0] - tune[0]), `intervals preserved: ${retuned}`)
 assert.ok(Math.abs(retuned[0] - tune[0]) <= 1)
 
+// Exactly half-way between two keys, and drifting across the half-way point
+// during the take: every note must still be named on the same side.
+const halfway = sampleTune.map((note, index) => {
+  const sungPitch = note.midi + 0.42 + 0.14 * (index / (sampleTune.length - 1)) + wobble[index] * 0.3
+  return { ...note, id: `n${index}`, midi: Math.round(sungPitch), sungPitch }
+})
+const named = midis(analysisFromNotes(halfway).notes)
+assert.ok(named.every((midi, index) => midi - tune[index] === named[0] - tune[0]), `one tune, not two keys: ${named.map((midi, index) => midi - tune[index])}`)
+
 // One note sung 40 cents flat lands on a key outside C major; the key decides.
 const slip = sampleTune.map((note, index) => {
   const sungPitch = index === 4 ? note.midi - 0.58 : note.midi + 0.02
@@ -32,6 +41,21 @@ const chromatic = sampleTune.map((note, index) => {
   return { ...note, id: `n${index}`, midi, sungPitch: midi + 0.03 }
 })
 assert.equal(analysisFromNotes(chromatic).notes[4].midi, 68)
+
+// Sung a third of a semitone under E flat minor, the tune is as much D minor
+// sung sharp: name it in the key with the plainer signature (1 flat, not 6).
+const minorTune = [62, 60, 62, 62, 57, 57, 62, 62, 60, 58, 57, 62, 60, 62, 62, 57, 62, 62, 60, 58, 57]
+const between = minorTune.map((midi, index) => {
+  const sungPitch = midi + 0.66 + wobble[index % wobble.length] * 0.4
+  return { id: `n${index}`, midi: Math.round(sungPitch), startBeat: index, durationBeats: 0.9, sungPitch }
+})
+assert.ok(between.every((note, index) => note.midi === minorTune[index] + 1), 'fixture rounds to E flat')
+const plain = analysisFromNotes(between)
+assert.deepEqual(midis(plain.notes), minorTune)
+assert.ok([[2, 'minor'], [7, 'minor'], [5, 'major'], [10, 'major']].some(([tonic, mode]) => plain.key.tonic === tonic && plain.key.mode === mode), `one-flat or two-flat key, got ${plain.key.tonic} ${plain.key.mode}`)
+// In tune, the same notes in E flat stay in E flat: the singer chose that key.
+const inTune = between.map((note) => ({ ...note, sungPitch: note.midi + 0.04 }))
+assert.deepEqual(midis(analysisFromNotes(inTune).notes), minorTune.map((midi) => midi + 1))
 
 // Notes without a measured pitch (the sample tune, older saves) are untouched.
 assert.deepEqual(midis(analysisFromNotes(sampleTune).notes), tune)
@@ -56,4 +80,4 @@ assert.equal(applyQuantize([{ id: 'a', midi: 60, startBeat: 1.3, durationBeats: 
 // Off-beat (syncopated) entries are not dragged onto the beat.
 const offbeat = sampleTune.map((note) => ({ ...note, startBeat: note.startBeat + 0.5, durationBeats: 0.4 }))
 assert.deepEqual(applyQuantize(offbeat, '16').map((note) => note.startBeat), offbeat.map((note) => note.startBeat))
-console.log('ok correction: singer tuning, key settles between-key notes, chromatic notes kept, shared lateness removed')
+console.log('ok correction: singer tuning, plainer key when between two, key settles between-key notes, chromatic notes kept, shared lateness removed')

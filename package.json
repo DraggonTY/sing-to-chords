@@ -10,9 +10,11 @@
     "preview": "vite preview",
     "test": "node scripts/check-music.ts && node scripts/check-pitch.ts && node scripts/check-engine.ts && node scripts/check-session.ts && node scripts/check-worker.ts && node scripts/check-segmentation.ts && node scripts/check-wav.ts && node scripts/check-playback.ts && node scripts/check-accompany.ts && node scripts/check-correction.ts && node scripts/check-tempo.ts",
     "benchmark:vocadito": "node scripts/benchmark-vocadito.ts",
-    "benchmark:singer": "node scripts/benchmark-singer.ts"
+    "benchmark:singer": "node scripts/benchmark-singer.ts",
+    "benchmark:key": "node scripts/benchmark-key.ts"
   },
   "dependencies": {
+    "onnxruntime-web": "^1.22.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "soundfont-player": "^0.12.0"

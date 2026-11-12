@@ -128,9 +128,38 @@ Free singing scores higher than the click because following the singer removes l
 
 Spotify's Basic Pitch model was also evaluated as a replacement note detector and rejected: on the 22 vocadito development tracks its best settings reached 58.4% / 55.5% note F1 (annotators 1 / 2) against 65.9% / 62.5% for this engine.
 
+### Key detection
+
+Key profiles are now Aarden–Essen (scale-degree use in sung folk melodies) instead of Krumhansl–Kessler probe-tone ratings, which describe harmony and heard a tune that dwells on its third as the minor key on that note. `npm run benchmark:key` checks 20 well-known melodies, given as exact notes, in all 12 keys: 180/240 (75%) before, 216/240 (90%) after. The two remaining tunes are modal (Dorian and Phrygian dominant), which a major/minor model cannot name. On the simulated singer without a click, the key was right in 47 of 64 takes, up from about 39.
+
+When a voice sits a quarter-tone or so from the piano's tuning, the tune lies between two keys; it is then named in the neighbouring key with fewer sharps or flats (D minor rather than E flat minor), which also gives easier chords. A melody that uses only four or five different notes can still fit several keys equally well; the tonic and mode selectors remain for that case.
+
+### Pitch engines, tested on real singers
+
+Three experiments on vocadito (real solo singers, scored against the measured pitch):
+
+1. **Where is the loss?** Feeding the dataset's hand-corrected pitch curves into this app's note segmenter scored 74.0% / 70.9% note F1 (annotators 1 / 2, 22 development tracks) against 70.3% / 66.8% for the app. A perfect pitch tracker is therefore worth about four points; the larger remaining gap is in deciding where notes begin, above all repeated notes with no pitch change.
+2. **A neural pitch tracker.** [SwiftF0](https://github.com/lars76/swift-f0) (MIT, 135 KB) feeding the same segmenter:
+
+   | Note F1, annotator 1 / 2 | Built-in tracker | SwiftF0 |
+   | --- | ---: | ---: |
+   | Development, clean | 70.3 / 66.8 | 73.4 / 68.7 |
+   | Held out, clean | 73.7 / 71.2 | 73.2 / 71.8 |
+   | Held out, noise at 20 dB | 75.2 / 72.6 | 74.3 / 71.9 |
+   | Held out, noise at 10 dB | 70.1 / 70.6 | 73.9 / 72.8 |
+
+   The two tie on clean recordings from singers not used for tuning; SwiftF0 holds its accuracy in heavy noise where the built-in tracker loses about three points. The noise is synthetic (broadband, low rumble and hum added to the recordings).
+3. **Basic Pitch** as a whole-note detector was rejected (see above).
+
+The app therefore picks per recording: when the quiet gaps sit within 21 dB of the singing (a noisy room or microphone) it loads SwiftF0 through `onnxruntime-web` and says so; otherwise it uses the built-in tracker and never downloads the 11 MB runtime. If the model cannot load, the built-in tracker is used. Both feed the same note segmenter, and everything runs on the device.
+
+Key detection also weighs where phrases come to rest (before a breath and at the end): tunes rest on the notes of the home chord. With that, `npm run benchmark:key` reaches 228/240 (95%) and the simulated singer's key is right in 56 of 64 takes.
+
 ## Research behind the changes
 
 - [Mauch & Dixon: pYIN (2014)](https://webspace.eecs.qmul.ac.uk/s.e.dixon/pub/2014/MauchDixon-PYIN-ICASSP2014.pdf): retaining pitch candidates and decoding them across time. The tracker borrows this approach; it is not a full reproduction of pYIN.
 - [Simon, Morris & Basu: MySong (2008)](https://www.microsoft.com/en-us/research/publication/mysong-automatic-accompaniment-generation-for-vocal-melodies/): selecting an accompaniment as a sequence. Our chord transitions are explicit musical heuristics, not MySong's trained HMM.
 - [music21 key-analysis documentation](https://www.music21.org/music21docs/moduleReference/moduleAnalysisDiscrete.html): duration-weighted Krumhansl–Schmuckler key profiles and alternate interpretations.
+- [Nieradzik: SwiftF0 (2025)](https://arxiv.org/abs/2508.18440): the neural pitch tracker used for noisy recordings; its model file and licence are in `public/models/`.
+- [Aarden (2003), via music21's key-analysis profiles](https://www.music21.org/music21docs/moduleReference/moduleAnalysisDiscrete.html): scale-degree distributions from sung folk melodies, used for key detection.
 - [Bittner et al.: vocadito (2021)](https://arxiv.org/abs/2110.05580): human note annotations for real solo vocals, including the distinction between tracking sung pitch and recognizing separate notes.
