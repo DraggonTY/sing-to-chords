@@ -20,7 +20,7 @@ type Song = {
   recordedBpm: number
   takeId?: number
 }
-type SavedTake = RecordedTake & { id: number; bpm: number; url: string }
+type SavedTake = RecordedTake & { id: number; bpm: number; url: string; free: boolean }
 
 export default function App() {
   const [studio] = useState(() => new Session())
@@ -36,6 +36,9 @@ export default function App() {
   const [style, setStyle] = useState<PianoStyle>('block')
   const [rich, setRich] = useState(false)
   const [melodyInMidi, setMelodyInMidi] = useState(false)
+  const [freeTempo, setFreeTempo] = useState(true)
+  const [beatNote, setBeatNote] = useState<string | null>(null)
+  const filePicker = useRef<HTMLInputElement | null>(null)
   const [pianoMessage, setPianoMessage] = useState<string | null>(null)
   const [hearMelody, setHearMelody] = useState(true)
   const [clickOnPlay, setClickOnPlay] = useState(true)
@@ -85,8 +88,8 @@ export default function App() {
     setError(null)
     setPlayhead(null)
     stopPiano()
-    setPhase('count')
-    setCountBeat(4)
+    setPhase(freeTempo ? 'record' : 'count')
+    setCountBeat(freeTempo ? 1 : 4)
     try {
       await studio?.arm(bpm, (beat, nextPhase) => {
         setPulse(beat)
@@ -97,7 +100,7 @@ export default function App() {
           setPhase('record')
           setCountBeat(beat + 1)
         }
-      })
+      }, freeTempo)
     } catch {
       setPhase('ready')
       setError('Microphone access is blocked. Allow the mic in the browser, then record again.')
@@ -109,22 +112,38 @@ export default function App() {
     const take = studio?.finishTake()
     if (!take) {
       setPhase('ready')
-      setError('That stopped during the count-in. Let the metronome reach 1, then sing.')
+      setError(freeTempo ? 'That take was too short. Press Record and sing a full phrase.' : 'That stopped during the count-in. Let the metronome reach 1, then sing.')
       return
     }
+    analyzeTake(take, freeTempo)
+  }
+
+  /** Transcribe a take. `free` means it was not sung to the click: find its beat. */
+  function analyzeTake(take: RecordedTake, free: boolean) {
+    setPhase('analyze')
+    setBeatNote(null)
     const savedTake: SavedTake = {
       ...take,
       id: ++takeSequence.current,
       bpm,
+      free,
       url: URL.createObjectURL(new Blob([encodeMonoWav(take.samples, take.sampleRate)], { type: 'audio/wav' })),
     }
     setLastTake(savedTake)
     const request = new AbortController()
     analysisRequest.current?.abort()
     analysisRequest.current = request
-    void transcribeSinging(savedTake.samples, savedTake.sampleRate, savedTake.bpm, request.signal)
+    void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal)
       .then((analysis) => {
         if (request.signal.aborted) return
+        const found = free && analysis.bpm ? analysis.bpm : savedTake.bpm
+        if (free && analysis.notes.length) {
+          setLastTake((current) => (current?.id === savedTake.id ? { ...current, bpm: found } : current))
+          setBpm(Math.min(160, Math.max(60, Math.round(found))))
+          setBeatNote((analysis.beatConfidence ?? 0) >= 0.3
+            ? `Found your tempo: about ${Math.round(found)} BPM.`
+            : `Not sure of your beat (guessed ${Math.round(found)} BPM). A steadier take, or singing with the click, will place the chords better.`)
+        }
         if (!analysis.notes.length) {
           setPhase('ready')
           setError('No clear melody came through. Use headphones, sing a little closer, and hold each note.')
@@ -136,7 +155,7 @@ export default function App() {
           confidence: analysis.confidence,
           edits: {},
           raw: analysis.notes,
-          recordedBpm: savedTake.bpm,
+          recordedBpm: found,
           takeId: savedTake.id,
         })
         setSelectedId(null)
@@ -150,6 +169,29 @@ export default function App() {
       .finally(() => {
         if (analysisRequest.current === request) analysisRequest.current = null
       })
+  }
+
+  async function openFile(file: File | undefined) {
+    if (!file) return
+    originalVoice.current?.pause()
+    analysisRequest.current?.abort()
+    analysisRequest.current = null
+    stopPiano()
+    studio.cancel()
+    setError(null)
+    setPhase('analyze')
+    try {
+      const take = await studio.decodeFile(await file.arrayBuffer())
+      if (take.samples.length / take.sampleRate > 600) {
+        setPhase('ready')
+        setError('That recording is longer than 10 minutes. Please choose a shorter one.')
+        return
+      }
+      analyzeTake(take, true)
+    } catch {
+      setPhase('ready')
+      setError('That file could not be read as audio. Try a WAV, MP3 or M4A recording.')
+    }
   }
 
   function cancelAnalysis() {
@@ -176,6 +218,7 @@ export default function App() {
       recordedBpm: 96,
     })
     setSelectedId(null)
+    setBeatNote(null)
     setPhase('ready')
     setBpm(96)
   }
@@ -242,7 +285,7 @@ export default function App() {
           <h1>Sing to Chords</h1>
         </div>
         <p className="lede">
-          Sing a melody against the click. The page keeps the notes and writes a piano progression that supports them. Swap any chord, then export MIDI.
+          Sing a melody at your own pace, or open a recording. The page finds your beat, keeps the notes and writes a piano progression that supports them. Swap any chord, then export MIDI.
         </p>
       </header>
 
@@ -350,6 +393,19 @@ export default function App() {
           <button type="button" disabled={!slots.length || busy} onClick={exportMidi}>
             Export MIDI
           </button>
+          <button type="button" className="ghost" disabled={busy} onClick={() => filePicker.current?.click()}>
+            Open audio file
+          </button>
+          <input
+            ref={filePicker}
+            type="file"
+            accept="audio/*,.wav,.mp3,.m4a,.aac,.ogg,.flac"
+            hidden
+            onChange={(event) => {
+              void openFile(event.target.files?.[0])
+              event.target.value = ''
+            }}
+          />
           <button type="button" className="ghost" disabled={busy} onClick={loadSample}>
             Load sample tune
           </button>
@@ -357,6 +413,10 @@ export default function App() {
       </section>
 
       <div className="options">
+        <label>
+          <input type="checkbox" checked={freeTempo} disabled={busy} onChange={(event) => setFreeTempo(event.target.checked)} />
+          Sing freely (no click — find my beat)
+        </label>
         <label>
           <input type="checkbox" checked={hearMelody} onChange={(event) => setHearMelody(event.target.checked)} />
           Hear the melody with the piano
@@ -373,14 +433,14 @@ export default function App() {
           <input type="checkbox" checked={melodyInMidi} onChange={(event) => setMelodyInMidi(event.target.checked)} />
           Include the melody in the MIDI file
         </label>
-        <p>Wear headphones so the click stays out of the recording.</p>
+        <p>{freeTempo ? 'Just press Record and sing at your own pace.' : 'Wear headphones so the click stays out of the recording.'}</p>
       </div>
 
       {lastTake && (
         <section className="options voice-review" aria-label="Compare your voice and detected melody">
           <div className="voice-review-label">
             <strong>Original voice</strong>
-            <small>{(lastTake.samples.length / lastTake.sampleRate).toFixed(1)} seconds · recorded at {lastTake.bpm} BPM</small>
+            <small>{(lastTake.samples.length / lastTake.sampleRate).toFixed(1)} seconds · {lastTake.free ? 'tempo found:' : 'recorded at'} {Math.round(lastTake.bpm)} BPM</small>
           </div>
           <audio
             ref={originalVoice}
@@ -406,10 +466,10 @@ export default function App() {
       )}
 
       <section className={`meter phase-${phase}`} aria-live="polite">
-        <Lamp pulse={pulse} active={phase === 'count' || phase === 'record'} />
+        <Lamp pulse={pulse} active={phase === 'count' || (phase === 'record' && !freeTempo)} />
         <div>
           {phase === 'count' && <strong>Count-in {countBeat}</strong>}
-          {phase === 'record' && <strong>Recording · beat {countBeat}</strong>}
+          {phase === 'record' && <strong>{freeTempo ? 'Recording · sing at your own pace' : `Recording · beat ${countBeat}`}</strong>}
           {phase === 'analyze' && <strong>Transcribing the melody…</strong>}
           {phase === 'ready' && song && (
             <strong>
@@ -419,8 +479,10 @@ export default function App() {
           {phase === 'ready' && !song && <strong>Ready when you are</strong>}
           <span>
             {phase === 'ready' && !song
-              ? 'Four clicks, then sing the whole tune. Compare your voice with the detected melody afterward.'
-              : 'Chords follow the whole phrase. Beat, half bar, or bar sets how often they can change.'}
+              ? freeTempo
+                ? 'Press Record and sing the whole tune, or open a recording. The app finds your tempo and beat.'
+                : 'Four clicks, then sing the whole tune. Compare your voice with the detected melody afterward.'
+              : beatNote ?? 'Chords follow the whole phrase. Beat, half bar, or bar sets how often they can change.'}
           </span>
         </div>
       </section>

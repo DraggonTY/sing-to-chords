@@ -6,7 +6,12 @@
  * single correct absolute key, so a take may be scored one semitone up or down
  * as a whole (the tune and its chords are then right, in a neighbouring key).
  *
- * node scripts/benchmark-singer.ts [--takes 60] [--quantize 16]
+ * node scripts/benchmark-singer.ts [--takes 64] [--quantize 16] [--free] [--drift]
+ *
+ * --free hides the click and the tempo: the app must find the beat from the
+ * singing. A take then counts notes after the best whole-beat shift, because
+ * which beat is "one" is a separate question (reported as bar line right).
+ * --drift lets the singer's tempo wander by several percent, as it does without a click.
  *
  * This measures recovery of the INTENDED tune, which the vocadito benchmark
  * cannot (its references are sung pitch, not intended notes). The singer is a
@@ -14,7 +19,7 @@
  * and uneven entries, consonant gaps, legato slides, breath noise. It does not
  * replace real recordings.
  */
-import { analysisFromNotes, applyQuantize, type QuantizeDivision } from '../src/music/analyze.ts'
+import { analysisFromNotes, analyzeFreely, applyQuantize, type QuantizeDivision } from '../src/music/analyze.ts'
 import { extractSingingNotes } from '../src/music/pitch.ts'
 
 type Tune = { name: string; mode: 'major' | 'minor'; notes: Array<[number, number, number]> }
@@ -44,6 +49,8 @@ const args = process.argv.slice(2)
 const option = (name: string, fallback: string) => { const index = args.indexOf(name); return index < 0 ? fallback : args[index + 1] }
 const takes = Number(option('--takes', '64'))
 const division = option('--quantize', '16') as QuantizeDivision
+const free = args.includes('--free')
+const drifting = args.includes('--drift')
 const rate = 16000
 
 function random(seed: number) {
@@ -63,7 +70,15 @@ function sing(tune: Tune, seed: number) {
   const steadiness = rng.between(0.6, 1.4) // a shakier or steadier singer
   const intended = tune.notes.map(([midi, start, duration]) => ({ midi: midi + transpose, startBeat: start, durationBeats: duration }))
   const lastBeat = intended.reduce((max, note) => Math.max(max, note.startBeat + note.durationBeats), 0)
-  const samples = new Float32Array(Math.ceil((lastBeat * beat + lag + 0.6) * rate))
+  // Without a click the pulse wanders: a slow random walk of the beat length.
+  const clock = [0]
+  let stretch = 1
+  for (let step = 1; step <= Math.ceil(lastBeat * 4) + 8; step++) {
+    if (drifting) stretch = Math.max(0.9, Math.min(1.1, stretch + rng.normal() * 0.006))
+    clock.push(clock[step - 1] + (beat / 4) * stretch)
+  }
+  const timeOf = (beats: number) => { const at = Math.min(clock.length - 2, Math.floor(beats * 4)); return clock[at] + (beats * 4 - at) * (clock[at + 1] - clock[at]) }
+  const samples = new Float32Array(Math.ceil((timeOf(lastBeat) + lag + 0.6) * rate))
   const harmonics = [0.5, 0.8, 0.45, 0.26, 0.15, 0.09, 0.06]
   let phase = 0
   let drift = 0
@@ -73,11 +88,11 @@ function sing(tune: Tune, seed: number) {
     const note = intended[index]
     drift = Math.max(-0.25, Math.min(0.25, drift + rng.normal() * 0.035))
     const target = note.midi + tuning + drift + rng.normal() * 0.17 * steadiness
-    const start = Math.max(previousEnd + 0.03, note.startBeat * beat + lag + rng.normal() * 0.024 * steadiness)
+    const start = Math.max(previousEnd + 0.03, timeOf(note.startBeat) + lag + rng.normal() * 0.024 * steadiness)
     const next = intended[index + 1]
     const legato = next !== undefined && Math.abs(next.startBeat - note.startBeat - note.durationBeats) < 1e-6 && rng.uniform() < 0.35
     // Detached notes stop for a consonant or breath; legato notes run into the next.
-    const sounded = note.durationBeats * beat - (legato ? 0 : rng.between(0.045, Math.min(0.14, note.durationBeats * beat * 0.35)))
+    const sounded = timeOf(note.startBeat + note.durationBeats) - timeOf(note.startBeat) - (legato ? 0 : rng.between(0.045, Math.min(0.14, note.durationBeats * beat * 0.35)))
     const end = start + Math.max(0.09, sounded)
     const connected = previousPitch !== null && start - previousEnd < 0.045
     const scoop = connected ? 0 : rng.uniform() < 0.45 ? rng.between(0.6, 2.2) : 0
@@ -105,20 +120,37 @@ function sing(tune: Tune, seed: number) {
     previousEnd = end
   }
   for (let sample = 0; sample < samples.length; sample++) samples[sample] += (rng.uniform() * 2 - 1) * 0.004
-  return { samples, bpm, intended, tonic: ((60 + transpose) % 12 + 12) % 12 }
+  return { samples, bpm, meanBpm: 60 * lastBeat / timeOf(lastBeat), intended, tonic: ((60 + transpose) % 12 + 12) % 12 }
 }
 
 const grid = division === '8' ? 0.5 : 0.25
 const totals = { intended: 0, detected: 0, right: 0, transposed: 0, keyRight: 0, takes: 0, perfect: 0 }
 const keyMisses: string[] = []
+const barLog: string[] = []
+// The app lays out bars of four beats, so the bar line is only scored on tunes in 4/4.
+const FOUR_FOUR = new Set(['Twinkle', 'Ode to Joy', 'Frere Jacques', 'When the Saints'])
+const tempo = { right: 0, octave: 0, bar: 0, barTakes: 0, wrong: [] as string[] }
 const stepLog: string[] = []
 const perTune = new Map<string, { intended: number; right: number; detected: number }>()
 const wrong: Record<string, number> = {}
 for (let take = 0; take < takes; take++) {
   const tune = TUNES[take % TUNES.length]
-  const { samples, bpm, intended, tonic } = sing(tune, 7919 * (take + 1))
-  const analysis = analysisFromNotes(extractSingingNotes(samples, rate, bpm))
-  const heard = applyQuantize(analysis.notes, division)
+  const { samples, bpm, meanBpm, intended, tonic } = sing(tune, 7919 * (take + 1))
+  const analysis = free ? analyzeFreely(samples, rate) : analysisFromNotes(extractSingingNotes(samples, rate, bpm))
+  let heard = applyQuantize(analysis.notes, division)
+  if (free) {
+    const ratio = analysis.bpm! / meanBpm
+    if (Math.abs(ratio - 1) < 0.06) tempo.right++
+    else if (Math.abs(ratio - 2) < 0.12 || Math.abs(ratio - 0.5) < 0.03) tempo.octave++
+    else tempo.wrong.push(`${tune.name} ${meanBpm.toFixed(0)}->${analysis.bpm}`)
+    // Which beat is "one" is scored separately: allow a whole-beat shift.
+    const at = (move: number) => intended.filter((note) => heard.some((candidate) => Math.abs(candidate.startBeat + move - note.startBeat) < 1e-6)).length
+    let move = 0
+    for (let candidate = -12; candidate <= 12; candidate++) if (at(candidate) > at(move)) move = candidate
+    if (FOUR_FOUR.has(tune.name)) { tempo.barTakes++; if (move % 4 === 0) tempo.bar++ }
+    if (args.includes("--verbose")) barLog.push(`${tune.name}:${((move % 4) + 4) % 4}`)
+    heard = heard.map((note) => ({ ...note, startBeat: note.startBeat + move }))
+  }
   const count = (shift: number) => intended.filter((note) => heard.some((candidate) => candidate.midi + shift === note.midi && Math.abs(candidate.startBeat - note.startBeat) < 1e-6)).length
   const shift = [0, 1, -1].reduce((best, candidate) => count(candidate) > count(best) ? candidate : best, 0)
   if (shift) totals.transposed++
@@ -148,10 +180,12 @@ for (let take = 0; take < takes; take++) {
 const percent = (value: number) => `${(value * 100).toFixed(1)}%`
 const recall = totals.right / totals.intended
 const precision = totals.right / Math.max(1, totals.detected)
-console.log(`simulated singer, ${totals.takes} takes, quantize ${division}`)
+console.log(`simulated singer, ${totals.takes} takes, quantize ${division}${free ? ', no click (tempo hidden)' : ''}${drifting ? ', drifting tempo' : ''}`)
+if (free) console.log(`  tempo found ${tempo.right}/${totals.takes}   double or half ${tempo.octave}   wrong ${tempo.wrong.length}   bar line right ${tempo.bar}/${tempo.barTakes} (4/4 tunes)${args.includes('--verbose') ? '\n  wrong tempos: ' + tempo.wrong.join('; ') : ''}`)
 console.log(`  intended notes right (pitch and sixteenth): ${percent(recall)}  (${totals.right}/${totals.intended})`)
 console.log(`  detected notes that are right:              ${percent(precision)}  (${totals.detected - totals.right} extra or wrong)`)
 console.log(`  F1 ${percent(2 * precision * recall / (precision + recall))}   perfect takes ${totals.perfect}/${totals.takes}   key right ${totals.keyRight}/${totals.takes}   scored a semitone away ${totals.transposed}/${totals.takes}`)
 if (args.includes('--verbose')) console.log(`  key misses: ${keyMisses.join('; ')}\n  grid-step misses (take:direction:length): ${stepLog.join(' ')}`)
 console.log(`  misses: ${Object.entries(wrong).sort((a, b) => b[1] - a[1]).map(([reason, count]) => `${reason} ${count}`).join('; ')}`)
+if (barLog.length) { const tally: Record<string, number> = {}; for (const item of barLog) tally[item] = (tally[item] ?? 0) + 1; console.log("  bar shift needed (tune:beats): " + Object.entries(tally).sort().map(([k, v]) => `${k} x${v}`).join("; ")) }
 for (const [name, entry] of perTune) console.log(`  ${name.padEnd(18)} right ${percent(entry.right / entry.intended)}  extra/wrong ${entry.detected - entry.right}`)

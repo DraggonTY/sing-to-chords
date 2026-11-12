@@ -29,6 +29,7 @@ export class Session {
   private beatIndex = 0
   private bpm = 90
   private recording = false
+  private free = false
   private chunks: Float32Array[] = []
   private captureStartedAt = 0
   private downbeatAt = 0
@@ -38,12 +39,14 @@ export class Session {
   private piano: Player | null = null
   private pianoLoading: Promise<Player> | null = null
 
-  async arm(bpm: number, onBeat: BeatHandler): Promise<void> {
+  /** `free` records at once with no count-in and no audible click: the beat is found afterwards. */
+  async arm(bpm: number, onBeat: BeatHandler, free = false): Promise<void> {
     this.stopPlayback()
     this.stopClicks()
     this.releaseInput()
     const version = this.inputVersion
     this.bpm = bpm
+    this.free = free
     this.onBeat = onBeat
     this.chunks = []
     this.recording = false
@@ -104,7 +107,7 @@ export class Session {
 
     const lead = 0.12
     this.nextBeatTime = context.currentTime + lead
-    this.downbeatAt = this.nextBeatTime + (60 / bpm) * 4
+    this.downbeatAt = free ? this.nextBeatTime : this.nextBeatTime + (60 / bpm) * 4
     this.scheduleClicks()
   }
 
@@ -129,6 +132,17 @@ export class Session {
     const skip = Math.max(0, Math.round((downbeatAt - captureStartedAt) * sampleRate))
     if (skip >= mixed.length - sampleRate * 0.25) return null
     return { samples: mixed.subarray(skip), sampleRate }
+  }
+
+  /** Decode an audio file (WAV, MP3, M4A…) to one channel for transcription. */
+  async decodeFile(data: ArrayBuffer): Promise<RecordedTake> {
+    const decoded = await this.getContext().decodeAudioData(data)
+    const samples = new Float32Array(decoded.length)
+    for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+      const input = decoded.getChannelData(channel)
+      for (let index = 0; index < samples.length; index++) samples[index] += input[index] / decoded.numberOfChannels
+    }
+    return { samples, sampleRate: decoded.sampleRate }
   }
 
   cancel(): void {
@@ -227,10 +241,12 @@ export class Session {
     const version = this.inputVersion
     const beat = 60 / this.bpm
     while (this.nextBeatTime < context.currentTime + 0.18) {
-      const node = strikeClick(context, this.nextBeatTime, this.beatIndex % 4 === 0)
-      this.clickNodes.add(node)
-      node.addEventListener('ended', () => this.clickNodes.delete(node), { once: true })
-      const phase = this.beatIndex < 4 ? 'count' : 'record'
+      if (!this.free) {
+        const node = strikeClick(context, this.nextBeatTime, this.beatIndex % 4 === 0)
+        this.clickNodes.add(node)
+        node.addEventListener('ended', () => this.clickNodes.delete(node), { once: true })
+      }
+      const phase = this.free || this.beatIndex >= 4 ? 'record' : 'count'
       const beatInBar = this.beatIndex % 4
       const delay = Math.max(0, (this.nextBeatTime - context.currentTime) * 1000)
       const timer = window.setTimeout(() => {

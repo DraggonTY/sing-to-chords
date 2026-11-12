@@ -1,6 +1,7 @@
 import { keyFromMelody, pitchClass, type Chord, type KeySignature, type RawNote } from './theory.ts'
 import { harmonizeMelody } from './harmonize.ts'
 import { extractSingingNotes } from './pitch.ts'
+import { findBeat, notesOnBeat } from './tempo.ts'
 
 export type QuantizeDivision = 'off' | '8' | '16'
 export type ChordSpan = 1 | 2 | 4
@@ -18,11 +19,26 @@ export type Analysis = {
   key: KeySignature
   confidence: number
   notes: RawNote[]
+  /** Set when the tempo was found from the singing instead of a click. */
+  bpm?: number
+  beatConfidence?: number
 }
 
 // Live transcription and the synchronous API deliberately share the same engine.
 export function analyzeRecording(samples: Float32Array, sampleRate: number, bpm: number): Analysis {
   return analysisFromNotes(extractSingingNotes(samples, sampleRate, bpm))
+}
+
+/**
+ * Free singing: no click and no tempo given. Transcribe in seconds, find the
+ * singer's own pulse, and place the notes on it.
+ */
+export function analyzeFreely(samples: Float32Array, sampleRate: number): Analysis {
+  const inSeconds = extractSingingNotes(samples, sampleRate, 60)
+  const map = findBeat(inSeconds.map((note) => ({ start: note.startBeat, end: note.startBeat + note.durationBeats })))
+  // Too little to find a pulse: keep seconds as beats (60 BPM) so nothing is lost.
+  if (!map) return { ...analysisFromNotes(inSeconds), bpm: 60, beatConfidence: 0 }
+  return { ...analysisFromNotes(notesOnBeat(inSeconds, map)), bpm: Math.round(map.bpm * 10) / 10, beatConfidence: map.confidence }
 }
 
 export function analyzeNoteList(notes: RawNote[]): Analysis {

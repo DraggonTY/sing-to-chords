@@ -1,14 +1,15 @@
-import { analysisFromNotes, type Analysis } from './analyze.ts'
+import { analysisFromNotes, analyzeFreely, type Analysis } from './analyze.ts'
 import { extractSingingNotes } from './pitch.ts'
 
+/** Pass `bpm: null` for a take sung without the click; the result then carries the tempo it found. */
 export async function transcribeSinging(
   samples: Float32Array,
   sampleRate: number,
-  bpm: number,
+  bpm: number | null,
   signal?: AbortSignal,
 ): Promise<Analysis> {
   if (signal?.aborted) throw new DOMException('Transcription cancelled.', 'AbortError')
-  const runLocally = () => analysisFromNotes(extractSingingNotes(samples, sampleRate, bpm))
+  const runLocally = () => bpm === null ? analyzeFreely(samples, sampleRate) : analysisFromNotes(extractSingingNotes(samples, sampleRate, bpm))
   if (typeof Worker === 'undefined') return runLocally()
   let worker: Worker
   try {

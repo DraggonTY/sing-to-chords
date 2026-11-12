@@ -1,6 +1,6 @@
 # Sing to Chords
 
-Record a melody against a metronome. The app detects a likely key, writes acoustic-piano chords under the melody, and exports that piano part as MIDI.
+Sing a melody freely, open a recording (WAV, MP3, M4A), or record against a metronome. The app finds the tempo and beat when there is no click, detects a likely key, writes acoustic-piano chords under the melody, and exports that piano part as MIDI.
 
 Requires Node.js 22.18 or newer.
 
@@ -105,6 +105,28 @@ vocadito cannot measure these, because its references are sung pitch, not the in
 | Notes right, Quantize 8ths | 71.9% | 94.3% |
 
 These are results on a model of a singer, not on people. They show the corrections work as designed; they do not establish the accuracy for a real voice and microphone. Most remaining misses are entries that land one grid step late.
+
+### Singing without a click
+
+With **Sing freely** on (the default), recording starts at once with no count-in or click, and **Open audio file** loads an existing recording. The tempo and beat are then found from the singing (`src/music/tempo.ts`):
+
+1. Every tempo from 56 to 176 BPM is lined up on the opening seconds and then followed through the take, letting nearby entries pull the pulse, because nobody keeps strict time without a click. A tempo is judged by how well it stays with the singer, with a preference for a walking pace and a penalty for grids whose beats mostly pass with no entry (a melody fits a grid twice as fast equally well).
+2. The bar line is the first note, unless a short pickup leads into a long note.
+3. Notes are re-expressed in beats on the followed pulse, so drifting tempo is absorbed before quantizing.
+
+Turn **Sing freely** off to record against the metronome as before.
+
+`npm run benchmark:singer -- --free` hides the click and tempo from the simulated singer; `--drift` also lets its tempo wander by up to 10%. A take is scored after the best whole-beat shift, and the bar line is scored separately on the four tunes in 4/4 (the app lays out bars of four beats; tunes in 3/4 get a usable beat but not true bars).
+
+| Simulated singer, 64 takes, 1,032 notes, Quantize 16ths | Tempo found | Bar line right (4/4 tunes) | Notes right |
+| --- | ---: | ---: | ---: |
+| With the click | given | given | 86.6% |
+| No click, steady tempo | 64/64 | 29/32 | 90.9% |
+| No click, drifting tempo | 64/64 | 32/32 | 92.5% |
+
+Free singing scores higher than the click because following the singer removes lateness and unevenness note by note. These are simulated results; the tempo preference and bar-line rule were chosen with these tunes in view. On real audio: a plain sung phrase gave a confident beat with entries on beats and half beats, while a syncopated vocal stem from a produced song gave a low-confidence tempo that disagreed with its drum track (about 3:2). The app says when it is unsure of the beat.
+
+Spotify's Basic Pitch model was also evaluated as a replacement note detector and rejected: on the 22 vocadito development tracks its best settings reached 58.4% / 55.5% note F1 (annotators 1 / 2) against 65.9% / 62.5% for this engine.
 
 ## Research behind the changes
 
