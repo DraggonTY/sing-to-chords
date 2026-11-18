@@ -2,31 +2,47 @@ import { analysisFromNotes, analysisOnFoundBeat, type Analysis } from './analyze
 import { extractSingingNotes, soundsNoisy } from './pitch.ts'
 import type { RawNote } from './theory.ts'
 
-self.onmessage = async (event: MessageEvent<{ samples: Float32Array; sampleRate: number; bpm: number | null }>) => {
+type Request = { samples: Float32Array; sampleRate: number; bpm: number | null }
+
+/** Notes in seconds (that is, at 60 BPM) from the best engine available, and which one it was. */
+async function transcribe(samples: Float32Array, sampleRate: number): Promise<{ notes: RawNote[]; engine: Analysis['engine']; engineError?: string }> {
+  let engineError: string | undefined
+  // 1. GAME, a model trained to turn singing into notes. Installed by `npm run models`.
+  try {
+    const [{ gameNotes }, { loadGame }, { tidyGameNotes }] = await Promise.all([import('./game.ts'), import('./game.web.ts'), import('./gameTidy.ts')])
+    const runtime = await loadGame()
+    if (runtime) {
+      const heard = await gameNotes(samples, sampleRate, runtime, (done) => self.postMessage({ progress: done }))
+      return { notes: tidyGameNotes(heard), engine: 'game' }
+    }
+  } catch (error) {
+    // A recording the app refuses (too long, bad rate) is refused by every engine.
+    if (error instanceof RangeError) throw error
+    engineError = error instanceof Error ? error.message : String(error)
+  }
+  // 2. Pitch tracking plus the built-in note segmenter. The two pitch trackers tie on clean
+  // recordings; the neural one keeps its accuracy in room noise, so it is loaded only then.
+  if (soundsNoisy(samples, sampleRate)) {
+    try {
+      const [{ extractSingingNotesNeural }, { loadPitchModel }] = await Promise.all([import('./neuralPitch.ts'), import('./neuralPitch.web.ts')])
+      return { notes: await extractSingingNotesNeural(samples, sampleRate, 60, await loadPitchModel()), engine: 'neural', engineError }
+    } catch (error) {
+      if (error instanceof RangeError) throw error
+      engineError = error instanceof Error ? error.message : String(error)
+    }
+  }
+  return { notes: extractSingingNotes(samples, sampleRate, 60), engine: 'built-in', engineError }
+}
+
+self.onmessage = async (event: MessageEvent<Request>) => {
   try {
     const { samples, sampleRate, bpm } = event.data
-    // No tempo means no click was used: transcribe in seconds and find the beat from the singing.
-    const tempo = bpm ?? 60
-    let notes: RawNote[]
-    let engine: Analysis['engine'] = 'built-in'
-    let engineError: string | undefined
-    // On real singers the two pitch trackers tie on clean recordings, and the
-    // neural one keeps its accuracy in room noise where the built-in one loses
-    // about three points. Load the model only for a recording that needs it.
-    if (!soundsNoisy(samples, sampleRate)) notes = extractSingingNotes(samples, sampleRate, tempo)
-    else try {
-      engine = 'neural'
-      const [{ extractSingingNotesNeural }, { loadPitchModel }] = await Promise.all([import('./neuralPitch.ts'), import('./neuralPitch.web.ts')])
-      notes = await extractSingingNotesNeural(samples, sampleRate, tempo, await loadPitchModel())
-    } catch (error) {
-      // A recording the app refuses (too long, bad rate) is refused either way.
-      if (error instanceof RangeError) throw error
-      // The model could not load or run (offline first visit, old browser): use the built-in tracker.
-      engine = 'built-in'
-      engineError = error instanceof Error ? error.message : String(error)
-      notes = extractSingingNotes(samples, sampleRate, tempo)
-    }
-    const analysis = bpm === null ? analysisOnFoundBeat(notes) : analysisFromNotes(notes)
+    if (bpm !== null && (!Number.isFinite(bpm) || bpm <= 0)) throw new RangeError('Tempo must be a positive number.')
+    const { notes, engine, engineError } = await transcribe(samples, sampleRate)
+    // No tempo means no click was used: find the beat from the singing. Otherwise seconds become beats.
+    const analysis = bpm === null
+      ? analysisOnFoundBeat(notes)
+      : analysisFromNotes(notes.map((note) => ({ ...note, startBeat: note.startBeat * bpm / 60, durationBeats: note.durationBeats * bpm / 60 })))
     self.postMessage({ analysis: { ...analysis, engine, engineError } })
   } catch (error) {
     self.postMessage({ error: error instanceof Error ? error.message : 'Could not transcribe this recording.' })

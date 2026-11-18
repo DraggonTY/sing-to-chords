@@ -23,7 +23,7 @@ export type Analysis = {
   bpm?: number
   beatConfidence?: number
   /** Which pitch tracker produced the notes. */
-  engine?: 'neural' | 'built-in'
+  engine?: 'game' | 'neural' | 'built-in'
   /** Why the neural tracker was not used, for diagnosis. */
   engineError?: string
 }

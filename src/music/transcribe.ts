@@ -7,6 +7,7 @@ export async function transcribeSinging(
   sampleRate: number,
   bpm: number | null,
   signal?: AbortSignal,
+  onProgress?: (done: number) => void,
 ): Promise<Analysis> {
   if (signal?.aborted) throw new DOMException('Transcription cancelled.', 'AbortError')
   const runLocally = () => bpm === null ? analyzeFreely(samples, sampleRate) : analysisFromNotes(extractSingingNotes(samples, sampleRate, bpm))
@@ -30,11 +31,17 @@ export async function transcribeSinging(
     const abort = () => {
       if (finish()) reject(new DOMException('Transcription cancelled.', 'AbortError'))
     }
-    const timeout = setTimeout(() => {
+    const expire = () => {
       if (finish()) reject(new Error('Transcription took too long. Please try a shorter recording.'))
-    }, 120000)
+    }
+    let timeout = setTimeout(expire, 120000)
     signal?.addEventListener('abort', abort, { once: true })
-    worker.onmessage = (event: MessageEvent<{ analysis?: Analysis; error?: string }>) => {
+    worker.onmessage = (event: MessageEvent<{ analysis?: Analysis; error?: string; progress?: number }>) => {
+      if (event.data.progress !== undefined && !event.data.analysis && !event.data.error) {
+        // Still working: report it and give the next piece its own time allowance.
+        if (!finished) { onProgress?.(event.data.progress); clearTimeout(timeout); timeout = setTimeout(expire, 120000) }
+        return
+      }
       if (!finish()) return
       if (event.data.analysis) resolve(event.data.analysis)
       else reject(new Error(event.data.error ?? 'Could not transcribe this recording.'))

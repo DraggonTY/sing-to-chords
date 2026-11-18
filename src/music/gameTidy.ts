@@ -1,0 +1,99 @@
+import type { GameNote } from './game.ts'
+import type { RawNote } from './theory.ts'
+import model from './gameTidy.model.json' with { type: 'json' }
+
+/**
+ * GAME writes a singer's scoop into a note as a short extra note below it, and
+ * sometimes splits one held note in two. This stage decides, for every boundary
+ * between two touching notes, whether a new note really starts there.
+ *
+ * The decision is a small network trained on the Children's Song Dataset's
+ * development songs (scripts/benchmark-csd.ts): its inputs are GAME's own
+ * features around the boundary (what the sound does there) and the two notes'
+ * lengths and pitches. A boundary judged false is removed and the pieces become
+ * one note, which keeps the earlier start and the pitch of its longest piece.
+ */
+type Layer = { weights: number[][]; bias: number[] }
+/** Several networks trained from different starting points; their answers are averaged. */
+type TidyModel = { threshold: number; mean: number[]; scale: number[]; members: Layer[][] }
+const MODEL = model as unknown as TidyModel
+
+/** Two notes touch when the gap between them is shorter than this (seconds). */
+const TOUCHING = 0.03
+
+/** GAME's notes as the app's notes, in seconds (that is, at 60 BPM), with false boundaries removed. */
+export function tidyGameNotes(notes: GameNote[]): RawNote[] {
+  type Piece = { start: number; end: number; pitch: number }
+  const merged: Array<{ start: number; end: number; pieces: Piece[] }> = []
+  notes.forEach((note, index) => {
+    const previous = notes[index - 1]
+    const joins = previous !== undefined && note.start - previous.end <= TOUCHING && startsNewNote(notes, index) < MODEL.threshold
+    if (joins) {
+      const whole = merged[merged.length - 1]
+      whole.end = note.end
+      whole.pieces.push(note)
+    } else merged.push({ start: note.start, end: note.end, pieces: [note] })
+  })
+  return merged.map((note, index) => {
+    const longest = note.pieces.reduce((best, piece) => piece.end - piece.start > best.end - best.start ? piece : best)
+    return {
+      id: `g${index}-${Math.round(note.start * 1000)}`,
+      midi: Math.round(longest.pitch),
+      sungPitch: Math.round(longest.pitch * 1000) / 1000,
+      startBeat: Math.round(note.start * 1000) / 1000,
+      durationBeats: Math.round((note.end - note.start) * 1000) / 1000,
+    }
+  }).filter((note) => note.durationBeats > 0)
+}
+
+/** Probability that a new note really starts at note `index` (which touches the note before it). */
+export function startsNewNote(notes: GameNote[], index: number): number {
+  const features = boundaryFeatures(notes, index)
+  const inputs = features.map((value, at) => (value - MODEL.mean[at]) / MODEL.scale[at])
+  let total = 0
+  for (const layers of MODEL.members) {
+    let values = inputs
+    layers.forEach((layer, depth) => {
+      const last = depth === layers.length - 1
+      values = layer.bias.map((bias, unit) => {
+        let sum = bias
+        const weights = layer.weights[unit]
+        for (let at = 0; at < values.length; at++) sum += weights[at] * values[at]
+        return last ? sum : Math.max(0, sum)
+      })
+    })
+    total += 1 / (1 + Math.exp(-values[0]))
+  }
+  return total / MODEL.members.length
+}
+
+const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value))
+
+/** GAME's features around the boundary, then what the two notes and their neighbours look like. */
+export function boundaryFeatures(notes: GameNote[], index: number): number[] {
+  const before = notes[index - 1]
+  const after = notes[index]
+  const earlier = notes[index - 2]
+  const later = notes[index + 1]
+  const beforeLength = before.end - before.start
+  const afterLength = after.end - after.start
+  const step = after.pitch - before.pitch
+  return [
+    ...after.context,
+    beforeLength,
+    afterLength,
+    Math.log(beforeLength + 0.01),
+    Math.log(afterLength + 0.01),
+    beforeLength / (beforeLength + afterLength),
+    clamp(step, -8, 8),
+    Math.min(Math.abs(step), 8),
+    Math.abs(before.pitch - Math.round(before.pitch)),
+    Math.abs(after.pitch - Math.round(after.pitch)),
+    earlier ? earlier.end - earlier.start : 1,
+    earlier ? Math.min(1, before.start - earlier.end) : 1,
+    earlier ? clamp(earlier.pitch - before.pitch, -8, 8) : 0,
+    later ? later.end - later.start : 1,
+    later ? Math.min(1, later.start - after.end) : 1,
+    later ? clamp(later.pitch - after.pitch, -8, 8) : 0,
+  ]
+}

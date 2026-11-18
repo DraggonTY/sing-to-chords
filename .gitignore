@@ -25,3 +25,7 @@ dist-ssr
 
 # Local benchmark output and recordings
 work
+
+# Downloaded by `npm run models` (51 MB)
+public/models/game
+.claude

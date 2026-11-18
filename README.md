@@ -13,7 +13,41 @@ Use headphones so the click does not leak into the microphone. Quantize can snap
 
 If a recording has extra or missing notes, compare the original voice player with **Play detected melody**. The isolated melody uses the original recording timing, without chords or a click. **Save voice** downloads a WAV so the same take can be used to reproduce a transcription problem. The latest take stays available even if analysis fails or is cancelled; it is kept in browser memory and is never uploaded.
 
+## The GAME engine and the score-level test
+
+The app now transcribes with [GAME](https://github.com/openvpi/GAME) (openvpi, MIT), a model trained to turn singing into notes, followed by a clean-up stage and the tuning, key and beat corrections described below. `npm run models` downloads the model (51 MB, checksum-verified, not committed); `npm run dev` and `npm run build` fetch it if it is missing. Without it, or if it cannot run, the app falls back to the pitch-tracking engines. Everything runs in the browser on the device, on several threads when the page is cross-origin isolated (the dev and preview servers send the headers).
+
+- **GAME** (`src/music/game.ts`): the published ONNX graphs. The encoder turns audio into features, the segmenter finds note boundaries in eight refinement passes, the estimator gives each note a pitch. Long recordings are cut at their quietest moments into pieces of at most 20 s.
+- **Clean-up** (`src/music/gameTidy.ts`): GAME writes a singer's scoop into a note as a short extra note below it, and sometimes splits one held note. For every boundary between two touching notes, a small network (three 64-unit networks, averaged) decides whether a new note really starts there, from GAME's own features around the boundary and the two notes' lengths and pitches. `scripts/train-game-tidy.py` trains it.
+
+### Measured on real singing with the true score
+
+`scripts/benchmark-csd.ts` uses the [Children's Song Dataset](https://zenodo.org/records/4916302) (Choi et al., 2020; CC BY-NC-SA 4.0): one professional singer, 50 English songs in two keys each, with the score's notes labelled in time. A score note counts as right when a detected note has the same semitone and starts within 100 ms of it, one detection per note; the figure is F1 over all notes. Songs 1–30 were the development set; songs 31–50 (40 recordings, 5,799 notes) were held out and scored once.
+
+| Held-out songs | Notes right (100 ms) | Precision / recall | Within 50 ms |
+| --- | ---: | ---: | ---: |
+| Previous engine (pitch tracking and note segmenter) | 78.7% | 78.6% / 78.9% | 73.8% |
+| GAME alone | 89.8% | 87.4% / 92.4% | 85.1% |
+| GAME, clean-up, tuning and key correction (the app) | **95.0%** | 95.1% / 95.0% | 90.1% |
+
+On the development songs the same pipeline scored 95.4% with the clean-up cross-validated by song.
+
+What this does and does not show:
+
+- **It is 95%, not higher, and part of the rest is the labels.** The labels mark syllable boundaries drawn by hand, consonants included, which sit up to about 100 ms from where the pitch changes on the beat; about 1.2% of development notes were detected with the right pitch 100–200 ms from their label. In about 1% more, an independent pitch tracker agrees with GAME that the singer sang a different note from the one labelled. With every boundary decision perfect, this pipeline would score about 96.5% on the development songs.
+- **One singer.** The clean-up was trained on this singer (English development songs plus 87 Korean recordings from the same dataset), and tested on her other songs. On vocadito (29 singers, labels of what was sung rather than of the score, 50 ms window) GAME matches annotator 2 far better than the previous engine (79.9% against 71.2% held out) and annotator 1 worse (66.9% against 73.7%), and the clean-up costs one to two points against both, because those annotators count ornaments as notes.
+- **Training-data licence.** The clean-up weights were learned from CSD, which is licensed for non-commercial use. Retrain on other data before any commercial use.
+- Rejected along the way: GAME's medium model (about one point better, four times the size and much slower); recording GAME's confidence with a stricter second pass (no gain once its features are used); pitch-curve, loudness, timbre and beat-grid inputs to the clean-up (0.2–0.4 points); settling in-between pitches from a pitch curve (no gain).
+
+```bash
+# Score the app's pipeline (needs the dataset, GAME's notes from src/music/game.ts run under Node, and SwiftF0 voicing)
+node scripts/benchmark-csd.ts --dataset /path/to/csd --voicing /path/to/voicing --game notes.json --split holdout
+```
+
 ## Engine
+
+The engines below are the fallback when the GAME model is not installed or cannot run.
+
 
 - **One singing transcriber:** the live recording and synchronous analysis APIs use the same monophonic pitch tracker. It tracks multiple periodicity candidates over time, handles vibrato and octave ambiguity, and preserves genuine octave jumps, chromatic notes and rests. Browser analysis runs in a Web Worker, with a local fallback when workers are unavailable.
 - **Singer's tuning:** each phrase is decoded on a semitone grid shifted to where that singer's steady notes actually sit, so a voice that has drifted from A440 does not flip between neighbouring keys.
@@ -162,4 +196,6 @@ Key detection also weighs where phrases come to rest (before a breath and at the
 - [music21 key-analysis documentation](https://www.music21.org/music21docs/moduleReference/moduleAnalysisDiscrete.html): duration-weighted Krumhansl–Schmuckler key profiles and alternate interpretations.
 - [Nieradzik: SwiftF0 (2025)](https://arxiv.org/abs/2508.18440): the neural pitch tracker used for noisy recordings; its model file and licence are in `public/models/`.
 - [Aarden (2003), via music21's key-analysis profiles](https://www.music21.org/music21docs/moduleReference/moduleAnalysisDiscrete.html): scale-degree distributions from sung folk melodies, used for key detection.
+- [openvpi: GAME](https://github.com/openvpi/GAME): the singing-voice-to-score model the app now uses first; workflow in its `ONNX.md`.
+- [Choi et al.: Children's Song Dataset (2020)](https://zenodo.org/records/4916302): score-labelled singing used to train the clean-up and to measure note accuracy.
 - [Bittner et al.: vocadito (2021)](https://arxiv.org/abs/2110.05580): human note annotations for real solo vocals, including the distinction between tracking sung pitch and recognizing separate notes.

@@ -19,7 +19,7 @@ type Song = {
   raw: ReturnType<typeof analyzeNoteList>['notes']
   recordedBpm: number
   takeId?: number
-  engine?: 'neural' | 'built-in'
+  engine?: 'game' | 'neural' | 'built-in'
 }
 type SavedTake = RecordedTake & { id: number; bpm: number; url: string; free: boolean }
 
@@ -39,6 +39,7 @@ export default function App() {
   const [melodyInMidi, setMelodyInMidi] = useState(false)
   const [freeTempo, setFreeTempo] = useState(true)
   const [beatNote, setBeatNote] = useState<string | null>(null)
+  const [progress, setProgress] = useState<number | null>(null)
   const filePicker = useRef<HTMLInputElement | null>(null)
   const [pianoMessage, setPianoMessage] = useState<string | null>(null)
   const [hearMelody, setHearMelody] = useState(true)
@@ -134,7 +135,8 @@ export default function App() {
     const request = new AbortController()
     analysisRequest.current?.abort()
     analysisRequest.current = request
-    void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal)
+    setProgress(null)
+    void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal, setProgress)
       .then((analysis) => {
         if (request.signal.aborted) return
         if (analysis.engineError) console.warn('Neural pitch engine unavailable, using the built-in one:', analysis.engineError)
@@ -473,11 +475,11 @@ export default function App() {
         <div>
           {phase === 'count' && <strong>Count-in {countBeat}</strong>}
           {phase === 'record' && <strong>{freeTempo ? 'Recording · sing at your own pace' : `Recording · beat ${countBeat}`}</strong>}
-          {phase === 'analyze' && <strong>Transcribing the melody…</strong>}
+          {phase === 'analyze' && <strong>Transcribing the melody…{progress !== null && progress < 1 ? ` ${Math.round(progress * 100)}%` : ''}</strong>}
           {phase === 'ready' && song && (
             <strong>
               {song.source === 'sample' ? 'Sample tune' : 'Recorded melody'} · {notes.length} notes
-              {song.engine === 'neural' ? ' · noisy recording, neural pitch engine' : ''}
+              {song.engine === 'game' ? ' · GAME singing model' : song.engine === 'neural' ? ' · noisy recording, neural pitch engine' : ''}
             </strong>
           )}
           {phase === 'ready' && !song && <strong>Ready when you are</strong>}
