@@ -28,6 +28,7 @@ import json
 import os
 
 import numpy as np
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
@@ -79,13 +80,25 @@ def note_features(notes, i):
 
 
 def fit(x, y):
+    """Three small networks and a forest of boosted trees; their answers are averaged."""
     scaler = StandardScaler().fit(x)
     members = [MLPClassifier(hidden_layer_sizes=HIDDEN, alpha=ALPHA, max_iter=400, early_stopping=True, random_state=seed).fit(scaler.transform(x), y) for seed in range(SEEDS)]
-    return scaler, members
+    forest = HistGradientBoostingClassifier(max_iter=300, learning_rate=0.06, max_leaf_nodes=15, l2_regularization=1.0).fit(x, y)
+    return scaler, members, forest
 
 
-def probability(scaler, members, x):
-    return np.mean([member.predict_proba(scaler.transform(x))[:, 1] for member in members], 0)
+def probability(scaler, members, forest, x):
+    networks = np.mean([member.predict_proba(scaler.transform(x))[:, 1] for member in members], 0)
+    return (networks + forest.predict_proba(x)[:, 1]) / 2
+
+
+def export_forest(forest):
+    """Each tree as a node list: a leaf is [value], a branch is [input, threshold, left, right]."""
+    trees = []
+    for (predictor,) in forest._predictors:
+        trees.append([[round(float(node['value']), 7)] if node['is_leaf'] else
+                      [int(node['feature_idx']), float(node['num_threshold']), int(node['left']), int(node['right'])] for node in predictor.nodes])
+    return {'base': round(float(forest._baseline_prediction.ravel()[0]), 5), 'trees': trees}
 
 
 def main():
@@ -94,7 +107,7 @@ def main():
     parser.add_argument('--voicing', required=True)
     parser.add_argument('--notes', nargs='+', required=True)
     parser.add_argument('--out', required=True)
-    parser.add_argument('--threshold', type=float, default=0.4)
+    parser.add_argument('--threshold', type=float, default=0.5)
     args = parser.parse_args()
 
     x, y, song = [], [], []
@@ -124,19 +137,19 @@ def main():
     right = total = 0
     for k in range(5):
         test = fold == k
-        scaler, members = fit(x[~test], y[~test])
-        predicted = probability(scaler, members, x[test]) >= args.threshold
+        predicted = probability(*fit(x[~test], y[~test]), x[test]) >= args.threshold
         right += int((predicted == (y[test] == 1)).sum())
         total += int(test.sum())
     print(f'cross-validated boundary decisions right: {100 * right / total:.1f}%')
 
-    scaler, members = fit(x, y)
+    scaler, members, forest = fit(x, y)
     model = {
         'threshold': args.threshold,
         'mean': [round(float(v), 5) for v in scaler.mean_],
         'scale': [round(max(float(v), 1e-4), 5) for v in scaler.scale_],
         'members': [[{'weights': [[round(float(w), 4) for w in column] for column in weights.T], 'bias': [round(float(b), 4) for b in bias]}
                      for weights, bias in zip(member.coefs_, member.intercepts_)] for member in members],
+        'forest': export_forest(forest),
     }
     with open(args.out, 'w') as handle:
         json.dump(model, handle, separators=(',', ':'))

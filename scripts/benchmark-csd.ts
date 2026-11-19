@@ -8,6 +8,9 @@
  *        [--notes notes.json] [--quantize 16|8|auto] [--verbose]
  *
  * The dataset directory holds `wav/en001a.wav …` and `CSD/english/{csv,metadata.json}`.
+ * `--language korean` scores the dataset's Korean half instead (`wavkr/kr001a.wav …`,
+ * `CSD/korean/…`), with `--split tune` (songs 1-10, used to choose GAME's language
+ * setting), `--split test` (songs 11-50) or `--split all`.
  * `--game <notes.json>` scores the GAME engine: the file holds GAME's notes per
  * recording as written by the app's own pipeline (src/music/game.ts run under
  * Node), with each note's encoder context in `<notes.json>.feat/<name>.f32`;
@@ -40,7 +43,7 @@
  * Split by song, fixed before any result was seen: songs 1-30 are the
  * development set (all tuning happens there), songs 31-50 are held out.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { analysisFromNotes, applyQuantize, type QuantizeDivision } from '../src/music/analyze.ts'
 import { extractSingingNotes } from '../src/music/pitch.ts'
@@ -57,9 +60,16 @@ const quantize = option('--quantize', '16')!
 const verbose = args.includes('--verbose')
 const notesFile = option('--notes')
 const voicingDir = option('--voicing')
+// `--dump <file>` writes the app's final notes (in seconds) for further analysis.
+const dumpFile = option('--dump')
+const dumped: Record<string, RawNote[]> = {}
 const gameFile = option('--game')
 const supplied: Record<string, RawNote[]> | null = notesFile ?? gameFile ? JSON.parse(readFileSync((notesFile ?? gameFile)!, 'utf8')) : null
-const metadata: Record<string, { songname: string; tempo: number; time_signature: string }> = JSON.parse(readFileSync(path.join(dataset, 'CSD/english/metadata.json'), 'utf8'))
+const language = option('--language', 'english')!
+const metadata: Record<string, { songname: string; tempo: number; time_signature: string }> = JSON.parse(readFileSync(path.join(dataset, `CSD/${language}/metadata.json`), 'utf8'))
+const inSplit = (song: number) => language === 'korean'
+  ? split === 'all' || (split === 'tune') === (song <= 10)
+  : (split === 'dev') === (song <= 30)
 
 function readWav(file: string): { samples: Float32Array; sampleRate: number } {
   const buffer = readFileSync(file)
@@ -110,12 +120,12 @@ function match<R, D>(reference: R[], detected: D[], ok: (r: R, d: D) => boolean)
 
 for (const name of Object.keys(metadata).sort()) {
   const song = Number(name.slice(2, 5))
-  if ((split === 'dev') !== (song <= 30)) continue
-  const wav = path.join(dataset, 'wav', `${name}.wav`)
+  if (!inSplit(song)) continue
+  const wav = path.join(dataset, language === 'korean' ? 'wavkr' : 'wav', `${name}.wav`)
   if (!supplied && !existsSync(wav)) continue
   if (supplied && !supplied[`${name}.wav`]) continue
   const bpm = metadata[name].tempo
-  const rows = readFileSync(path.join(dataset, 'CSD/english/csv', `${name}.csv`), 'utf8').trim().split(/\r?\n/).slice(1).map((row) => {
+  const rows = readFileSync(path.join(dataset, `CSD/${language}/csv`, `${name}.csv`), 'utf8').trim().split(/\r?\n/).slice(1).map((row) => {
     const [start, end, pitch] = row.split(',')
     return { start: Number(start), end: Number(end), midi: Number(pitch) }
   })
@@ -149,6 +159,7 @@ for (const name of Object.keys(metadata).sort()) {
   else { const { samples, sampleRate } = readWav(wav); seconds = extractSingingNotes(samples, sampleRate, 60) }
   const inBeats = seconds.map((note) => ({ ...note, startBeat: note.startBeat * bpm / 60, durationBeats: note.durationBeats * bpm / 60 }))
   const analysis = analysisFromNotes(inBeats)
+  if (dumpFile) dumped[`${name}.wav`] = analysis.notes.map((note) => ({ ...note, startBeat: note.startBeat * 60 / bpm, durationBeats: note.durationBeats * 60 / bpm }))
   let division: QuantizeDivision = quantize === '8' ? '8' : '16'
   const placed = applyQuantize(analysis.notes, division).map((note) => ({ midi: note.midi, cell: Math.round(note.startBeat * 4) }))
 
@@ -185,12 +196,13 @@ for (const name of Object.keys(metadata).sort()) {
   }
 }
 
-const percent = (value: number) => `${(value * 100).toFixed(1)}%`
+if (dumpFile) writeFileSync(dumpFile, JSON.stringify(dumped))
+const percent = (value: number) => `${(value * 100).toFixed(args.includes("--exact") ? 3 : 1)}%`
 const line = (label: string, tally: Tally) => {
   const precision = tally.right / Math.max(1, tally.detected), recall = tally.right / Math.max(1, tally.reference)
   return `${label.padEnd(44)} F1 ${percent(2 * tally.right / Math.max(1, tally.detected + tally.reference))}   precision ${percent(precision)}   recall ${percent(recall)}`
 }
-console.log(`CSD ${split}: ${takes} recordings, ${grid.reference} score notes${gameFile ? `, GAME${args.includes('--no-tidy') ? ' without clean-up' : ' with clean-up'}` : supplied ? `, notes from ${path.basename(notesFile!)}` : ', built-in engine'}, quantize ${quantize}`)
+console.log(`CSD ${language} ${split}: ${takes} recordings, ${grid.reference} score notes${gameFile ? `, GAME${args.includes('--no-tidy') ? ' without clean-up' : ' with clean-up'}` : supplied ? `, notes from ${path.basename(notesFile!)}` : ', built-in engine'}, quantize ${quantize}`)
 console.log(line('NOTES RIGHT (same semitone, within 100 ms)', within100))
 console.log(line('same semitone, within 50 ms', within50))
 console.log(line('after Quantize: same pitch, same sixteenth', grid))

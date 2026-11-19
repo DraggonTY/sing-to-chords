@@ -18,7 +18,7 @@ If a recording has extra or missing notes, compare the original voice player wit
 The app now transcribes with [GAME](https://github.com/openvpi/GAME) (openvpi, MIT), a model trained to turn singing into notes, followed by a clean-up stage and the tuning, key and beat corrections described below. `npm run models` downloads the model (51 MB, checksum-verified, not committed); `npm run dev` and `npm run build` fetch it if it is missing. Without it, or if it cannot run, the app falls back to the pitch-tracking engines. Everything runs in the browser on the device, on several threads when the page is cross-origin isolated (the dev and preview servers send the headers).
 
 - **GAME** (`src/music/game.ts`): the published ONNX graphs. The encoder turns audio into features, the segmenter finds note boundaries in eight refinement passes, the estimator gives each note a pitch. Long recordings are cut at their quietest moments into pieces of at most 20 s.
-- **Clean-up** (`src/music/gameTidy.ts`): GAME writes a singer's scoop into a note as a short extra note below it, and sometimes splits one held note. For every boundary between two touching notes, a small network (three 64-unit networks, averaged) decides whether a new note really starts there, from GAME's own features around the boundary and the two notes' lengths and pitches. `scripts/train-game-tidy.py` trains it.
+- **Clean-up** (`src/music/gameTidy.ts`): GAME writes a singer's scoop into a note as a short extra note below it, and sometimes splits one held note. For every boundary between two touching notes, three small networks and a forest of boosted trees, averaged, decide whether a new note really starts there, from GAME's own features around the boundary and the two notes' lengths and pitches. `scripts/train-game-tidy.py` trains it.
 
 ### Measured on real singing with the true score
 
@@ -28,15 +28,28 @@ The app now transcribes with [GAME](https://github.com/openvpi/GAME) (openvpi, M
 | --- | ---: | ---: | ---: |
 | Previous engine (pitch tracking and note segmenter) | 78.7% | 78.6% / 78.9% | 73.8% |
 | GAME alone | 89.8% | 87.4% / 92.4% | 85.1% |
-| GAME, clean-up, tuning and key correction (the app) | **95.0%** | 95.1% / 95.0% | 90.1% |
+| GAME, clean-up, tuning and key correction (the app) | **95.3%** | 95.4% / 95.3% | 90.3% |
 
-On the development songs the same pipeline scored 95.4% with the clean-up cross-validated by song.
+The held-out songs were scored once with a network-only clean-up (95.0%) and a second time after boosted trees were added to it (95.3%, the shipped model); nothing was tuned on them. On the development songs the pipeline scored 95.4% with the clean-up cross-validated by song.
+
+**A second test set: the dataset's Korean half.** 87 recordings (13,653 notes) by the same singer. They are part of the clean-up's training data, so each song was scored by a clean-up trained without it (five folds by song; the English recordings always in training), then given the app's tuning and key correction:
+
+| Korean songs, each held out of the clean-up's training | Notes right (100 ms) | Precision / recall |
+| --- | ---: | ---: |
+| All 87 recordings, GAME alone and key-aware naming | 95.4% | 95.2% / 95.6% |
+| All 87 recordings, the pipeline | **96.95%** | 97.9% / 96.0% |
+| Songs 11–50 only (70 recordings, 11,116 notes) | 97.4% | 98.1% / 96.7% |
+
+The full-set figure rounds to 97.0% and is the one to quote. The songs 11–50 row needs a caveat: that split was made to choose GAME's language setting on songs 1–10 (which in the end made no difference), after it was already visible that several of the weakest recordings were among songs 1–10, so it is not a clean selection. These songs suit the method better than the English ones: only 3% of GAME's touching boundaries are false there against 10% in the English songs (fewer scoops), and an independent pitch tracker contradicts 1.8% of the labels against 3.6%.
 
 What this does and does not show:
 
-- **It is 95%, not higher, and part of the rest is the labels.** The labels mark syllable boundaries drawn by hand, consonants included, which sit up to about 100 ms from where the pitch changes on the beat; about 1.2% of development notes were detected with the right pitch 100–200 ms from their label. In about 1% more, an independent pitch tracker agrees with GAME that the singer sang a different note from the one labelled. With every boundary decision perfect, this pipeline would score about 96.5% on the development songs.
+- **It is 95% on the English songs, not higher, and part of the rest is the labels.** The labels mark syllable boundaries drawn by hand, consonants included, which sit up to about 100 ms from where the pitch changes on the beat; about 1.2% of development notes were detected with the right pitch 100–200 ms from their label. In about 1% more, an independent pitch tracker agrees with GAME that the singer sang a different note from the one labelled. With every boundary decision perfect, this pipeline would score about 96.5% on the development songs.
 - **One singer.** The clean-up was trained on this singer (English development songs plus 87 Korean recordings from the same dataset), and tested on her other songs. On vocadito (29 singers, labels of what was sung rather than of the score, 50 ms window) GAME matches annotator 2 far better than the previous engine (79.9% against 71.2% held out) and annotator 1 worse (66.9% against 73.7%), and the clean-up costs one to two points against both, because those annotators count ornaments as notes.
 - **Training-data licence.** The clean-up weights were learned from CSD, which is licensed for non-commercial use. Retrain on other data before any commercial use.
+- **Why not higher: three methods stop at the same place.** After the clean-up, I trained a second decoder from scratch on the labels themselves (a two-layer bidirectional GRU over GAME's encoder features, predicting note starts and score pitch), and then combined it with the clean-up. Alone it scored 93.8% on its validation songs; as extra evidence for the boundary decisions it changed nothing (97.0% of decisions right with or without it); settling halfway pitches with it lost 0.4–0.6 points; adding the note starts it found gained 0.07. A model trained on these labels cannot match their timing better than GAME does, so what remains at the boundaries is disagreement in the hand labels rather than something learnable.
+- **Against labels an independent tracker does not contradict.** SwiftF0 contradicts 3.6% of the held-out labels (its median pitch over the note is 0.7 semitones or more from the label, or the voice runs on and its pitch changes more than 100 ms from the labelled boundary). Scored only against the rest, the held-out figure is 95.9% (development: 96.7%). So about one point of the gap to 100% is the labels; the other four are real mistakes: missed note starts (about 1.9%), extra notes (about 1.3%) and pitches GAME reports as exactly halfway between two keys (about 0.8%).
+- Also tried without gain, all measured on development or cross-validated data: GAME's language settings on the Korean songs (Japanese finds more note starts raw, 92.5% against 91.2% on a subset, but nothing after the clean-up); pooling the note starts of two GAME passes (98.5% of starts found against 97.8%, same final score); choosing the clean-up's cut-off inside each training fold (flat between 0.2 and 0.6); splitting long notes at loudness dips (five points worse: hundreds of false notes).
 - Rejected along the way: GAME's medium model (about one point better, four times the size and much slower); recording GAME's confidence with a stricter second pass (no gain once its features are used); pitch-curve, loudness, timbre and beat-grid inputs to the clean-up (0.2–0.4 points); settling in-between pitches from a pitch curve (no gain).
 
 ```bash

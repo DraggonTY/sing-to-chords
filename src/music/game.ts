@@ -29,7 +29,13 @@ const STEPS = 8
 const BOUNDARY_THRESHOLD = 0.2
 const PRESENCE_THRESHOLD = 0.2
 const BOUNDARY_RADIUS = 2n
-const ENGLISH = 1n
+/**
+ * The lyric languages GAME was trained on. The segmenter finds syllable boundaries
+ * better when told the language; `other` leaves it unset. For a language it was not
+ * trained on, the nearest in sound works best (Japanese for Korean, measured on CSD).
+ */
+export const GAME_LANGUAGES = { other: 0n, en: 1n, ja: 2n, yue: 3n, zh: 4n } as const
+export type GameLanguage = keyof typeof GAME_LANGUAGES
 // Frames before and after a boundary that describe what changes there.
 const SPANS: readonly (readonly [number, number])[] = [[-16, -8], [-8, -3], [-3, 3], [3, 8], [8, 16]]
 export const GAME_CONTEXT_SPANS = SPANS.length
@@ -43,6 +49,7 @@ export async function gameNotes(
   sampleRate: number,
   run: GameRuntime,
   onProgress?: (done: number) => void,
+  language: GameLanguage = 'en',
 ): Promise<GameNote[]> {
   if (!checkRecording(samples, sampleRate, 60)) return []
   const audio = prepareAudio(samples, sampleRate, MODEL_RATE)
@@ -50,7 +57,7 @@ export async function gameNotes(
   const pieces = chunks(audio)
   for (let index = 0; index < pieces.length; index++) {
     const [from, to] = pieces[index]
-    for (const note of await transcribeChunk(audio.slice(from, to), run)) {
+    for (const note of await transcribeChunk(audio.slice(from, to), run, GAME_LANGUAGES[language])) {
       notes.push({ ...note, start: note.start + from / MODEL_RATE, end: note.end + from / MODEL_RATE })
     }
     onProgress?.((index + 1) / pieces.length)
@@ -104,7 +111,7 @@ export async function gameFeatures(
   return { frames, width, segmentation, estimation }
 }
 
-async function transcribeChunk(audio: Float32Array, run: GameRuntime): Promise<GameNote[]> {
+async function transcribeChunk(audio: Float32Array, run: GameRuntime, language: bigint): Promise<GameNote[]> {
   const duration = audio.length / MODEL_RATE
   const encoded = await run('encoder', {
     waveform: { type: 'float32', data: audio, dims: [1, audio.length] },
@@ -116,7 +123,7 @@ async function transcribeChunk(audio: Float32Array, run: GameRuntime): Promise<G
   })).boundaries
   const refine = async (previous: GameTensor | GameOutput, step: number) => (await run('segmenter', {
     x_seg: encoded.x_seg,
-    language: { type: 'int64', data: new BigInt64Array([ENGLISH]), dims: [1] },
+    language: { type: 'int64', data: new BigInt64Array([language]), dims: [1] },
     known_boundaries: known,
     prev_boundaries: previous,
     t: { type: 'float32', data: new Float32Array([step / STEPS]), dims: [1] },

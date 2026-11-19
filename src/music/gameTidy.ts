@@ -7,15 +7,21 @@ import model from './gameTidy.model.json' with { type: 'json' }
  * sometimes splits one held note in two. This stage decides, for every boundary
  * between two touching notes, whether a new note really starts there.
  *
- * The decision is a small network trained on the Children's Song Dataset's
- * development songs (scripts/benchmark-csd.ts): its inputs are GAME's own
+ * The decision comes from small networks and boosted trees trained on the Children's Song Dataset's
+ * development songs (scripts/benchmark-csd.ts): the inputs are GAME's own
  * features around the boundary (what the sound does there) and the two notes'
  * lengths and pitches. A boundary judged false is removed and the pieces become
  * one note, which keeps the earlier start and the pitch of its longest piece.
  */
 type Layer = { weights: number[][]; bias: number[] }
-/** Several networks trained from different starting points; their answers are averaged. */
-type TidyModel = { threshold: number; mean: number[]; scale: number[]; members: Layer[][] }
+/** A tree is a list of nodes: a leaf is `[value]`, a branch is `[input, threshold, left, right]`. */
+type Tree = number[][]
+/**
+ * Several networks trained from different starting points, and a forest of
+ * boosted trees over the same inputs. The answer is the average of the networks'
+ * mean and the forest; the two make different mistakes.
+ */
+type TidyModel = { threshold: number; mean: number[]; scale: number[]; members: Layer[][]; forest: { base: number; trees: Tree[] } }
 const MODEL = model as unknown as TidyModel
 
 /** Two notes touch when the gap between them is shorter than this (seconds). */
@@ -64,7 +70,13 @@ export function startsNewNote(notes: GameNote[], index: number): number {
     })
     total += 1 / (1 + Math.exp(-values[0]))
   }
-  return total / MODEL.members.length
+  let margin = MODEL.forest.base
+  for (const tree of MODEL.forest.trees) {
+    let node = tree[0]
+    while (node.length > 1) node = tree[features[node[0]] <= node[1] ? node[2] : node[3]]
+    margin += node[0]
+  }
+  return (total / MODEL.members.length + 1 / (1 + Math.exp(-margin))) / 2
 }
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value))
