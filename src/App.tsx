@@ -19,7 +19,7 @@ type Song = {
   raw: ReturnType<typeof analyzeNoteList>['notes']
   recordedBpm: number
   takeId?: number
-  engine?: 'game' | 'neural' | 'built-in'
+  engine?: 'game' | 'game-large' | 'neural' | 'built-in'
 }
 type SavedTake = RecordedTake & { id: number; bpm: number; url: string; free: boolean }
 
@@ -38,6 +38,9 @@ export default function App() {
   const [rich, setRich] = useState(false)
   const [melodyInMidi, setMelodyInMidi] = useState(false)
   const [freeTempo, setFreeTempo] = useState(true)
+  const [largeInstalled, setLargeInstalled] = useState(false)
+  // On by default: used when the larger model is installed, otherwise the standard one runs.
+  const [largeModel, setLargeModel] = useState(true)
   const [beatNote, setBeatNote] = useState<string | null>(null)
   const [progress, setProgress] = useState<number | null>(null)
   const filePicker = useRef<HTMLInputElement | null>(null)
@@ -67,6 +70,12 @@ export default function App() {
   }, [studio])
 
   useEffect(() => () => analysisRequest.current?.abort(), [])
+  // The larger singing model is an optional install; offer it only when it is there.
+  useEffect(() => {
+    let current = true
+    void import('./music/game.web.ts').then(({ gameInstalled }) => gameInstalled('large')).then((found) => { if (current) setLargeInstalled(found) }, () => {})
+    return () => { current = false }
+  }, [])
 
   useEffect(() => {
     const player = originalVoice.current
@@ -121,7 +130,7 @@ export default function App() {
   }
 
   /** Transcribe a take. `free` means it was not sung to the click: find its beat. */
-  function analyzeTake(take: RecordedTake, free: boolean) {
+  function analyzeTake(take: RecordedTake, free: boolean, large = largeModel) {
     setPhase('analyze')
     setBeatNote(null)
     const savedTake: SavedTake = {
@@ -136,10 +145,10 @@ export default function App() {
     analysisRequest.current?.abort()
     analysisRequest.current = request
     setProgress(null)
-    void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal, setProgress)
+    void transcribeSinging(savedTake.samples, savedTake.sampleRate, free ? null : savedTake.bpm, request.signal, setProgress, large)
       .then((analysis) => {
         if (request.signal.aborted) return
-        if (analysis.engineError) console.warn('Neural pitch engine unavailable, using the built-in one:', analysis.engineError)
+        if (analysis.engineError) console.warn('A transcription engine was unavailable, so a fallback was used:', analysis.engineError)
         const found = free && analysis.bpm ? analysis.bpm : savedTake.bpm
         if (free && analysis.notes.length) {
           setLastTake((current) => (current?.id === savedTake.id ? { ...current, bpm: found } : current))
@@ -422,6 +431,21 @@ export default function App() {
           <input type="checkbox" checked={freeTempo} disabled={busy} onChange={(event) => setFreeTempo(event.target.checked)} />
           Sing freely (no click — find my beat)
         </label>
+        {largeInstalled && (
+          <label>
+            <input
+              type="checkbox"
+              checked={largeModel}
+              disabled={busy}
+              onChange={(event) => {
+                setLargeModel(event.target.checked)
+                // Transcribe the current take again, so the two models can be compared on it.
+                if (lastTake) analyzeTake({ samples: lastTake.samples, sampleRate: lastTake.sampleRate }, lastTake.free, event.target.checked)
+              }}
+            />
+            Larger singing model (slower)
+          </label>
+        )}
         <label>
           <input type="checkbox" checked={hearMelody} onChange={(event) => setHearMelody(event.target.checked)} />
           Hear the melody with the piano
@@ -479,7 +503,7 @@ export default function App() {
           {phase === 'ready' && song && (
             <strong>
               {song.source === 'sample' ? 'Sample tune' : 'Recorded melody'} · {notes.length} notes
-              {song.engine === 'game' ? ' · GAME singing model' : song.engine === 'neural' ? ' · noisy recording, neural pitch engine' : ''}
+              {song.engine === 'game' ? ' · GAME singing model' : song.engine === 'game-large' ? ' · GAME singing model (large)' : song.engine === 'neural' ? ' · noisy recording, neural pitch engine' : ''}
             </strong>
           )}
           {phase === 'ready' && !song && <strong>Ready when you are</strong>}

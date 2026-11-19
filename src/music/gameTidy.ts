@@ -21,19 +21,34 @@ type Tree = number[][]
  * boosted trees over the same inputs. The answer is the average of the networks'
  * mean and the forest; the two make different mistakes.
  */
-type TidyModel = { threshold: number; mean: number[]; scale: number[]; members: Layer[][]; forest: { base: number; trees: Tree[] } }
+export type TidyModel = { threshold: number; mean: number[]; scale: number[]; members: Layer[][]; forest: { base: number; trees: Tree[] } }
 const MODEL = model as unknown as TidyModel
+/** Inputs that follow GAME's features: the two notes and their neighbours. */
+const NOTE_INPUTS = 15
+
+/**
+ * The clean-up trained for the GAME model that produced `notes`. GAME's standard model and its
+ * larger one have features of different widths, and each has its own clean-up weights; the
+ * larger model's are loaded only when that model is in use.
+ */
+export async function tidyModelFor(notes: GameNote[]): Promise<TidyModel> {
+  const inputs = (notes[0]?.context.length ?? MODEL.mean.length - NOTE_INPUTS) + NOTE_INPUTS
+  if (inputs === MODEL.mean.length) return MODEL
+  const large = (await import('./gameTidy.large.ts')).default as unknown as TidyModel
+  if (inputs !== large.mean.length) throw new Error('No clean-up model matches this GAME model.')
+  return large
+}
 
 /** Two notes touch when the gap between them is shorter than this (seconds). */
 const TOUCHING = 0.03
 
 /** GAME's notes as the app's notes, in seconds (that is, at 60 BPM), with false boundaries removed. */
-export function tidyGameNotes(notes: GameNote[]): RawNote[] {
+export function tidyGameNotes(notes: GameNote[], trained: TidyModel = MODEL): RawNote[] {
   type Piece = { start: number; end: number; pitch: number }
   const merged: Array<{ start: number; end: number; pieces: Piece[] }> = []
   notes.forEach((note, index) => {
     const previous = notes[index - 1]
-    const joins = previous !== undefined && note.start - previous.end <= TOUCHING && startsNewNote(notes, index) < MODEL.threshold
+    const joins = previous !== undefined && note.start - previous.end <= TOUCHING && startsNewNote(notes, index, trained) < trained.threshold
     if (joins) {
       const whole = merged[merged.length - 1]
       whole.end = note.end
@@ -53,11 +68,11 @@ export function tidyGameNotes(notes: GameNote[]): RawNote[] {
 }
 
 /** Probability that a new note really starts at note `index` (which touches the note before it). */
-export function startsNewNote(notes: GameNote[], index: number): number {
+export function startsNewNote(notes: GameNote[], index: number, trained: TidyModel = MODEL): number {
   const features = boundaryFeatures(notes, index)
-  const inputs = features.map((value, at) => (value - MODEL.mean[at]) / MODEL.scale[at])
+  const inputs = features.map((value, at) => (value - trained.mean[at]) / trained.scale[at])
   let total = 0
-  for (const layers of MODEL.members) {
+  for (const layers of trained.members) {
     let values = inputs
     layers.forEach((layer, depth) => {
       const last = depth === layers.length - 1
@@ -70,13 +85,13 @@ export function startsNewNote(notes: GameNote[], index: number): number {
     })
     total += 1 / (1 + Math.exp(-values[0]))
   }
-  let margin = MODEL.forest.base
-  for (const tree of MODEL.forest.trees) {
+  let margin = trained.forest.base
+  for (const tree of trained.forest.trees) {
     let node = tree[0]
     while (node.length > 1) node = tree[features[node[0]] <= node[1] ? node[2] : node[3]]
     margin += node[0]
   }
-  return (total / MODEL.members.length + 1 / (1 + Math.exp(-margin))) / 2
+  return (total / trained.members.length + 1 / (1 + Math.exp(-margin))) / 2
 }
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value))

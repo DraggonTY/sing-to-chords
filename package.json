@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "models": "node scripts/fetch-models.mjs",
-    "predev": "node scripts/fetch-models.mjs --optional",
-    "prebuild": "node scripts/fetch-models.mjs --optional",
+    "models:large": "node scripts/fetch-models.mjs --large",
+    "predev": "node scripts/fetch-models.mjs --optional && node scripts/fetch-models.mjs --large --optional",
+    "prebuild": "node scripts/fetch-models.mjs --optional && node scripts/fetch-models.mjs --large --optional",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

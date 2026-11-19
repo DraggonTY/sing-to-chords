@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { gameNotes, GAME_CONTEXT_SPANS, type GameRuntime, type GameTensor } from '../src/music/game.ts'
-import { boundaryFeatures, startsNewNote, tidyGameNotes } from '../src/music/gameTidy.ts'
+import { boundaryFeatures, startsNewNote, tidyGameNotes, tidyModelFor } from '../src/music/gameTidy.ts'
 
 // A stand-in for the model graphs: each call is recorded, and the "model" reports
 // a fixed set of notes per piece of audio, so the plumbing can be checked exactly.
@@ -82,4 +82,18 @@ assert.equal(tidy.at(-1)!.startBeat, 2.6)
 assert.ok(Math.abs(tidy.reduce((sum, note) => sum + note.durationBeats, 0) - 1.7) < 0.01, 'no sung time is dropped')
 tidy.forEach((note, index) => { assert.ok(Number.isInteger(note.midi)); if (index) assert.ok(note.startBeat >= tidy[index - 1].startBeat + tidy[index - 1].durationBeats - 1e-6) })
 assert.deepEqual(tidyGameNotes([]), [])
-console.log('ok GAME engine: note timing, refinement passes, context pooling, long recordings in pieces, resampling, clean-up invariants')
+
+// The larger GAME model has wider features and its own clean-up weights, chosen by that width.
+const standard = await tidyModelFor(phrase)
+assert.equal(standard.mean.length, 640 + 15)
+assert.equal(await tidyModelFor([]), standard, 'nothing heard: the standard weights')
+const wide = (seed: number) => Float32Array.from({ length: 1280 }, (_, index) => Math.sin(seed * 5.1 + index * 0.23) * 0.5)
+const widePhrase = phrase.map((note, index) => ({ ...note, context: wide(index + 1) }))
+const large = await tidyModelFor(widePhrase)
+assert.equal(large.mean.length, 1280 + 15)
+for (const index of [1, 2]) { const p = startsNewNote(widePhrase, index, large); assert.ok(p >= 0 && p <= 1 && Number.isFinite(p), `probability, got ${p}`) }
+const wideTidy = tidyGameNotes(widePhrase, large)
+assert.ok(wideTidy.length >= 2 && wideTidy.length <= 4)
+assert.ok(Math.abs(wideTidy.reduce((sum, note) => sum + note.durationBeats, 0) - 1.7) < 0.01, 'no sung time is dropped')
+await assert.rejects(() => tidyModelFor([{ ...phrase[0], context: new Float32Array(100) }]), /No clean-up model/)
+console.log('ok GAME engine: note timing, refinement passes, context pooling, long recordings in pieces, resampling, clean-up invariants for both model sizes')

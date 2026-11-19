@@ -1,13 +1,17 @@
 import { analysisFromNotes, analyzeFreely, type Analysis } from './analyze.ts'
 import { extractSingingNotes } from './pitch.ts'
 
-/** Pass `bpm: null` for a take sung without the click; the result then carries the tempo it found. */
+/**
+ * Pass `bpm: null` for a take sung without the click; the result then carries the tempo it found.
+ * `largeModel` asks for GAME's larger model; the standard one is used when that is not installed or cannot run.
+ */
 export async function transcribeSinging(
   samples: Float32Array,
   sampleRate: number,
   bpm: number | null,
   signal?: AbortSignal,
   onProgress?: (done: number) => void,
+  largeModel = false,
 ): Promise<Analysis> {
   if (signal?.aborted) throw new DOMException('Transcription cancelled.', 'AbortError')
   const runLocally = () => bpm === null ? analyzeFreely(samples, sampleRate) : analysisFromNotes(extractSingingNotes(samples, sampleRate, bpm))
@@ -58,7 +62,7 @@ export async function transcribeSinging(
     try {
       // Playback owns the original buffer, so only transfer a copy to the worker.
       const copy = samples.slice()
-      worker.postMessage({ samples: copy, sampleRate, bpm }, [copy.buffer])
+      worker.postMessage({ samples: copy, sampleRate, bpm, largeModel }, [copy.buffer])
     } catch (error) {
       if (finish()) reject(error)
     }

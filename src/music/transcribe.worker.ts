@@ -2,23 +2,27 @@ import { analysisFromNotes, analysisOnFoundBeat, type Analysis } from './analyze
 import { extractSingingNotes, soundsNoisy } from './pitch.ts'
 import type { RawNote } from './theory.ts'
 
-type Request = { samples: Float32Array; sampleRate: number; bpm: number | null }
+type Request = { samples: Float32Array; sampleRate: number; bpm: number | null; largeModel?: boolean }
 
 /** Notes in seconds (that is, at 60 BPM) from the best engine available, and which one it was. */
-async function transcribe(samples: Float32Array, sampleRate: number): Promise<{ notes: RawNote[]; engine: Analysis['engine']; engineError?: string }> {
+async function transcribe(samples: Float32Array, sampleRate: number, largeModel: boolean): Promise<{ notes: RawNote[]; engine: Analysis['engine']; engineError?: string }> {
   let engineError: string | undefined
-  // 1. GAME, a model trained to turn singing into notes. Installed by `npm run models`.
-  try {
-    const [{ gameNotes }, { loadGame }, { tidyGameNotes }] = await Promise.all([import('./game.ts'), import('./game.web.ts'), import('./gameTidy.ts')])
-    const runtime = await loadGame()
-    if (runtime) {
-      const heard = await gameNotes(samples, sampleRate, runtime, (done) => self.postMessage({ progress: done }))
-      return { notes: tidyGameNotes(heard), engine: 'game' }
+  // 1. GAME, a model trained to turn singing into notes. Installed by `npm run models` and
+  // `npm run models:large`. If the larger model cannot run here, the standard one is tried.
+  const tried = new Set<string>()
+  for (const size of largeModel ? ['large', 'standard'] as const : ['standard'] as const) {
+    try {
+      const [{ gameNotes }, { loadGame }, { tidyGameNotes, tidyModelFor }] = await Promise.all([import('./game.ts'), import('./game.web.ts'), import('./gameTidy.ts')])
+      const game = await loadGame(size)
+      if (!game || tried.has(game.size)) continue
+      tried.add(game.size)
+      const heard = await gameNotes(samples, sampleRate, game.run, (done) => self.postMessage({ progress: done }))
+      return { notes: tidyGameNotes(heard, await tidyModelFor(heard)), engine: game.size === 'large' ? 'game-large' : 'game', engineError }
+    } catch (error) {
+      // A recording the app refuses (too long, bad rate) is refused by every engine.
+      if (error instanceof RangeError) throw error
+      engineError = error instanceof Error ? error.message : String(error)
     }
-  } catch (error) {
-    // A recording the app refuses (too long, bad rate) is refused by every engine.
-    if (error instanceof RangeError) throw error
-    engineError = error instanceof Error ? error.message : String(error)
   }
   // 2. Pitch tracking plus the built-in note segmenter. The two pitch trackers tie on clean
   // recordings; the neural one keeps its accuracy in room noise, so it is loaded only then.
@@ -36,9 +40,9 @@ async function transcribe(samples: Float32Array, sampleRate: number): Promise<{ 
 
 self.onmessage = async (event: MessageEvent<Request>) => {
   try {
-    const { samples, sampleRate, bpm } = event.data
+    const { samples, sampleRate, bpm, largeModel } = event.data
     if (bpm !== null && (!Number.isFinite(bpm) || bpm <= 0)) throw new RangeError('Tempo must be a positive number.')
-    const { notes, engine, engineError } = await transcribe(samples, sampleRate)
+    const { notes, engine, engineError } = await transcribe(samples, sampleRate, largeModel === true)
     // No tempo means no click was used: find the beat from the singing. Otherwise seconds become beats.
     const analysis = bpm === null
       ? analysisOnFoundBeat(notes)

@@ -10,7 +10,7 @@ file holds weights, not recordings.
 
 Inputs, produced by running the app's own GAME pipeline (src/music/game.ts) under Node:
   --notes  one or more JSON files: {"<name>.wav": [{startBeat, durationBeats, sungPitch}, ...]} in seconds
-           with each note's encoder context in "<file>.feat/<name>.f32" (float32, 640 per note)
+           with each note's encoder context in "<file>.feat/<name>.f32" (float32, 640 per note; 1280 for the larger model)
   --csd    the dataset root, holding CSD/english/csv, CSD/korean/csv
   --voicing  per-recording SwiftF0 output {conf: [...]} every 16 ms (to find where a note's voice begins)
 
@@ -18,9 +18,16 @@ A boundary is real when it is the detected onset nearest to a score note's onset
 and within 100 ms of it. English songs 31-50 are the held-out test set and are
 never read here. Cross-validation is by song over English songs 1-30.
 
+The dataset's two halves share tunes: six held-out English songs are also sung in
+Korean, and one has the tune of a development song. Those recordings (SHARED_TUNES)
+are left out of training, so that no held-out melody is seen in any language.
+
 Requires numpy and scikit-learn.
 
   python3 scripts/train-game-tidy.py --csd DIR --voicing DIR --notes english.json korean.json --out src/music/gameTidy.model.json
+
+For GAME's larger model, give its notes (1280 context values per note), write to
+src/music/gameTidy.large.model.json and pass --threshold 0.4, which the development songs preferred for it.
 """
 import argparse
 import csv
@@ -37,6 +44,9 @@ TOUCHING = 0.03   # seconds: notes closer than this share a boundary
 SEEDS = 3
 HIDDEN = (64,)
 ALPHA = 1.0
+# Training songs with the tune of a held-out song (33, 39, 41, 42, 46, 48). Found by comparing the
+# score's pitch steps, repeated notes merged: a match ratio of 0.6 or more (difflib.SequenceMatcher).
+SHARED_TUNES = ['en001', 'kr001', 'kr035', 'kr037', 'kr040', 'kr041', 'kr044', 'kr050']
 
 
 def score_notes(root, voicing, name):
@@ -108,6 +118,7 @@ def main():
     parser.add_argument('--notes', nargs='+', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--threshold', type=float, default=0.5)
+    parser.add_argument('--exclude', nargs='*', default=SHARED_TUNES, help='recordings to leave out, by name prefix')
     args = parser.parse_args()
 
     x, y, song = [], [], []
@@ -119,6 +130,8 @@ def main():
             english = name.startswith('en')
             if english and int(name[2:5]) > 30:
                 continue  # held out
+            if any(name.startswith(prefix) for prefix in args.exclude):
+                continue  # the same tune as a held-out song
             notes = [{'s': v['startBeat'], 'e': v['startBeat'] + v['durationBeats'], 'p': v['sungPitch']} for v in raw]
             context = np.fromfile(os.path.join(path + '.feat', name + '.f32'), dtype=np.float32).reshape(len(notes), -1)
             real = real_onsets(score_notes(args.csd, args.voicing, name), notes)

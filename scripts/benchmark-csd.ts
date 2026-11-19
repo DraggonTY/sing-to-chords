@@ -48,7 +48,7 @@ import path from 'node:path'
 import { analysisFromNotes, applyQuantize, type QuantizeDivision } from '../src/music/analyze.ts'
 import { extractSingingNotes } from '../src/music/pitch.ts'
 import type { GameNote } from '../src/music/game.ts'
-import { tidyGameNotes } from '../src/music/gameTidy.ts'
+import { tidyGameNotes, tidyModelFor } from '../src/music/gameTidy.ts'
 import type { RawNote } from '../src/music/theory.ts'
 
 const args = process.argv.slice(2)
@@ -154,7 +154,7 @@ for (const name of Object.keys(metadata).sort()) {
     const all = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4)
     const width = raw.length ? all.length / raw.length : 0
     const heard: GameNote[] = raw.map((note, index) => ({ start: note.startBeat, end: note.startBeat + note.durationBeats, pitch: note.sungPitch ?? note.midi, context: all.subarray(index * width, (index + 1) * width) }))
-    seconds = args.includes('--no-tidy') ? raw : tidyGameNotes(heard)
+    seconds = args.includes('--no-tidy') ? raw : tidyGameNotes(heard, await tidyModelFor(heard))
   } else if (supplied) seconds = supplied[`${name}.wav`]
   else { const { samples, sampleRate } = readWav(wav); seconds = extractSingingNotes(samples, sampleRate, 60) }
   const inBeats = seconds.map((note) => ({ ...note, startBeat: note.startBeat * bpm / 60, durationBeats: note.durationBeats * bpm / 60 }))
